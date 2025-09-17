@@ -280,10 +280,26 @@ exports.handleMessage = async (socket:any, message: ClientVarMessage) => {
     // Remember this information since we won't have the cookie in further socket.io messages. This
     // information will be used to check if the sessionId of this connection is still valid since it
     // could have been deleted by the API.
+    
+    // PURE USERNAME-BASED: Store userName instead of token
+    let userName: string | undefined;
+    if (message.userInfo && message.userInfo.name) {
+      userName = message.userInfo.name.trim();
+    }
+    
+    if (!userName || userName === '') {
+      console.error(`[NO-TOKEN] No userName provided in CLIENT_READY message.`);
+      socket.emit('message', {
+        type: 'ERROR', 
+        error: 'userName is required. Please access with ?userName=YourName parameter.'
+      });
+      return;
+    }
+    
     thisSession.auth = {
       sessionID: message.sessionID,
       padID: message.padId,
-      token: message.token,
+      userName: userName,  // Store userName instead of token
     };
 
     // Pad does not exist, so we need to sanitize the id
@@ -313,8 +329,23 @@ exports.handleMessage = async (socket:any, message: ClientVarMessage) => {
   }
 
   const {session: {user} = {}} = socket.client.request as SocketClientRequest;
+  
+  // PURE USERNAME-BASED: Get userName from session auth (NO TOKEN)
+  const userName = thisSession.auth.userName;
+  
+  if (!userName || userName.trim() === '') {
+    console.error(`[NO-TOKEN] No userName in session auth. Token-based auth is disabled.`);
+    socket.emit('message', {
+      type: 'ERROR', 
+      error: 'userName is required. Please reconnect with ?userName=YourName parameter.'
+    });
+    throw new Error('userName is required - token-based authentication is disabled');
+  }
+  
+  console.log(`[NO-TOKEN] Using userName from session: ${userName}`);
+  
   const {accessStatus, authorID} =
-      await securityManager.checkAccess(auth.padID, auth.sessionID, auth.token, user);
+      await securityManager.checkAccess(auth.padID, auth.sessionID, userName, user);
   if (accessStatus !== 'grant') {
     socket.emit('message', {accessStatus});
     throw new Error('access denied');

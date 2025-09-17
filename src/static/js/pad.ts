@@ -182,38 +182,99 @@ const sendClientReady = (isReconnect) => {
     document.title = `${padId.replace(/_+/g, ' ')} | ${title}`;
   }
 
-  let token = Cookies.get('token');
-  if (token == null || !padutils.isValidAuthorToken(token)) {
-    token = padutils.generateAuthorToken();
-    Cookies.set('token', token, {expires: 60});
+  // PURE USERNAME-BASED: Extract userName from URL parameters (NO TOKEN/COOKIE)
+  const urlParams = new URLSearchParams(window.location.search);
+  const userNameFromUrl = urlParams.get('userName');
+  
+  if (!userNameFromUrl || userNameFromUrl.trim() === '') {
+    // NO userName provided - show error and stop
+    alert('Error: userName parameter is required.\n\nPlease access with: ?userName=YourName');
+    console.error('[NO-TOKEN] userName parameter is required in URL');
+    return;
   }
+  
+  console.log(`[NO-TOKEN] Using userName from URL: ${userNameFromUrl}`);
 
-  // If known, propagate the display name and color to the server in the CLIENT_READY message. This
-  // allows the server to include the values in its reply CLIENT_VARS message (which avoids
-  // initialization race conditions) and in the USER_NEWINFO messages sent to the other users on the
-  // pad (which enables them to display a user join notification with the correct name).
-  const params = getUrlVars();
+  // NO TOKEN GENERATION - pure userName-based approach
+  
+  // Build userInfo with userName from URL
   const userInfo = {
-    colorId: params.get('userColor'),
-    name: params.get('userName'),
+    name: userNameFromUrl.trim(),
   };
+  
+  if (settings.globalUserColor !== false) {
+    userInfo.colorId = settings.globalUserColor;
+  }
+  
+  console.log(`[NO-TOKEN] Sending pure userName-based CLIENT_READY: ${userInfo.name}`);
 
-  const msg = {
-    component: 'pad',
-    type: 'CLIENT_READY',
-    padId,
-    sessionID: Cookies.get('sessionID'),
-    token,
-    userInfo,
-  };
+  let sessionID = null;
 
-  // this is a reconnect, lets tell the server our revisionnumber
   if (isReconnect) {
-    msg.client_rev = pad.collabClient.getCurrentRevisionNumber();
-    msg.reconnect = true;
+    // For reconnects, try to use existing sessionID
+    sessionID = localStorage.getItem('etherpad_sessionID');
+  } else {
+    // For new connections, clear any old sessionID
+    if (clientVars.sessionID) {
+      sessionID = clientVars.sessionID;
+    } else {
+      localStorage.removeItem('etherpad_sessionID');
+    }
   }
 
-  socket.emit("message", msg);
+  const postAceInit = () => {
+    clientVars = serverVars;
+    padeditbar.init();
+    padeditor.init(userInfo.name, userInfo.colorId);
+
+    paduserlist.init(clientVars.userId, {
+      colorId: userInfo.colorId,
+      name: userInfo.name,
+    });
+
+    // If the LineNumbersDisabled value is set to true then remove the menu btn
+    if (settings.LineNumbersDisabled) {
+      $('#ep_line_numbers').parent().remove();
+    }
+
+    padimpexp.init();
+    padsavedrevs.init(clientVars.savedRevisions);
+
+    padconnectionstatus.init();
+
+    paddocbar.init({
+      isTitleEditable: settings.isTitleEditable,
+      initialTitle: clientVars.initialTitle,
+    });
+
+    padmodals.init();
+
+    pad.sendClientReady();
+  };
+
+  // Preserve userName in URL for consistency
+  if (!isReconnect) {
+    const currentParams = new URLSearchParams(window.location.search);
+    currentParams.set('userName', userNameFromUrl);
+    
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState({}, '', `${window.location.pathname}?${currentParams.toString()}`);
+    }
+  }
+
+  // PURE USERNAME-BASED CLIENT_READY message (NO TOKEN)
+  const msg = {
+    component: 'pad',  // 必需字段！
+    type: 'CLIENT_READY',
+    sessionID,
+    protocolVersion: 2,
+    userInfo,
+    padId,
+    client_rev: clientVars.rev,
+  };
+
+  console.log(`[NO-TOKEN] Sending CLIENT_READY with userName: ${userInfo.name}`);
+  socket.emit('message', msg);
 };
 
 const handshake = async () => {

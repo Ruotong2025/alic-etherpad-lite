@@ -182,7 +182,7 @@ export type ClientReadyMessage = {
   component: string,
   padId: string,
   sessionID: string,
-  token: string,
+  // token: string,  // REMOVED - pure userName-based system
   userInfo: UserInfo,
   reconnect?: boolean
   client_rev?: number
@@ -314,7 +314,7 @@ export type SocketClientReadyMessage = {
   component: string
   padId: string
   sessionID: string
-  token: string
+  // token: string  // REMOVED - pure userName-based system
   userInfo: {
     colorId: string|null
     name: string|null

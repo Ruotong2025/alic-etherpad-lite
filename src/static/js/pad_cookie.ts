@@ -22,45 +22,84 @@ import {Cookies} from "./pad_utils";
 exports.padcookie = new class {
   constructor() {
     this.cookieName_ = window.location.protocol === 'https:' ? 'prefs' : 'prefsHttp';
+    this.localStorageKey_ = 'etherpad_prefs';
+    // In userName-based system, prefer localStorage over cookies
+    this.useLocalStorage_ = typeof Storage !== 'undefined';
   }
 
   init() {
-    const prefs = this.readPrefs_() || {};
+    let prefs = this.readPrefs_() || {};
     delete prefs.userId;
     delete prefs.name;
     delete prefs.colorId;
     this.writePrefs_(prefs);
-    // Re-read the saved cookie to test if cookies are enabled.
-    if (this.readPrefs_() == null) {
+    
+    // Simple check - if no storage available at all, warn user
+    if (!this.useLocalStorage_ && this.readPrefs_() == null) {
+      console.warn('[PADCOOKIE] No storage available for preferences');
       $.gritter.add({
-        title: 'Error',
-        text: html10n.get('pad.noCookie'),
-        sticky: true,
-        class_name: 'error',
+        title: 'Notice',
+        text: 'Browser storage not available. Preferences will not be saved.',
+        sticky: false,
+        time: 3000,
+        class_name: 'warning',
       });
     }
   }
 
   readPrefs_() {
+    // In userName-based system, prefer localStorage over cookies
+    if (this.useLocalStorage_) {
+      try {
+        const json = localStorage.getItem(this.localStorageKey_);
+        if (json != null) {
+          return JSON.parse(json);
+        }
+      } catch (e) {
+        console.warn('[PADCOOKIE] localStorage read failed:', e);
+      }
+    }
+
+    // Fallback to cookies if localStorage not available
     try {
       const json = Cookies.get(this.cookieName_);
-      if (json == null) return null;
-      return JSON.parse(json);
+      if (json != null) {
+        return JSON.parse(json);
+      }
     } catch (e) {
-      return null;
+      console.warn('[PADCOOKIE] Cookie read failed:', e);
     }
+
+    return null;
   }
 
   writePrefs_(prefs) {
-    Cookies.set(this.cookieName_, JSON.stringify(prefs), {expires: 365 * 100});
+    // In userName-based system, prefer localStorage over cookies
+    if (this.useLocalStorage_) {
+      try {
+        localStorage.setItem(this.localStorageKey_, JSON.stringify(prefs));
+        return;
+      } catch (e) {
+        console.warn('[PADCOOKIE] localStorage write failed:', e);
+      }
+    }
+
+    // Fallback to cookies if localStorage not available
+    try {
+      Cookies.set(this.cookieName_, JSON.stringify(prefs), {expires: 365 * 100});
+      return;
+    } catch (e) {
+      console.warn('[PADCOOKIE] Cookie write failed:', e);
+    }
   }
 
   getPref(prefName) {
-    return this.readPrefs_()[prefName];
+    const prefs = this.readPrefs_();
+    return prefs ? prefs[prefName] : null;
   }
 
   setPref(prefName, value) {
-    const prefs = this.readPrefs_();
+    const prefs = this.readPrefs_() || {};
     prefs[prefName] = value;
     this.writePrefs_(prefs);
   }

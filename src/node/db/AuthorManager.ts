@@ -150,16 +150,103 @@ const getAuthor4Token = async (token: string) => {
 };
 
 /**
- * Returns the AuthorID for a token.
- * @param {String} token
- * @param {Object} user
- * @return {Promise<*>}
+ * Returns the AuthorID for a userName, creating one if it doesn't exist.
+ * This ensures user identity continuity based on userName rather than cookies.
+ * Examples: userName="Laura" -> always returns "a.aBTGWrPXaOY1R1FD"
+ * @param {String} userName The username of the user
+ * @return {Promise<string>} The authorID (e.g., a.aBTGWrPXaOY1R1FD)
  */
-exports.getAuthorId = async (token: string, user: object) => {
-  const context = {dbKey: token, token, user};
-  let [authorId] = await hooks.aCallFirst('getAuthorId', context);
-  if (!authorId) authorId = await getAuthor4Token(context.dbKey);
+exports.getAuthorIdByUserName = async (userName: string): Promise<string> => {
+  if (!userName || userName.trim() === '') {
+    throw new Error('userName cannot be empty');
+  }
+  
+  // Normalize userName to handle case sensitivity and whitespace
+  const normalizedUserName = userName.trim().toLowerCase();
+  
+  // Create a stable mapping key based on userName
+  const mapperKey = `username2author:${normalizedUserName}`;
+  
+  // Try to find existing author for this userName
+  let authorId = await db.get(mapperKey);
+  
+  if (authorId == null) {
+    // No author exists for this userName, create a new one
+    const authorResult = await exports.createAuthor(userName); // Use original case for display
+    authorId = authorResult.authorID;
+    
+    // Create the userName to author mapping
+    await db.set(mapperKey, authorId);
+    
+    console.log(`[USERNAME-BASED] Created new author ${authorId} for userName: ${userName}`);
+  } else {
+    // Author exists, update timestamp to show recent activity
+    await db.setSub(`globalAuthor:${authorId}`, ['timestamp'], Date.now());
+    console.log(`[USERNAME-BASED] Found existing author ${authorId} for userName: ${userName}`);
+  }
+  
   return authorId;
+};
+
+/**
+ * Gets the userName associated with an authorID
+ * @param {String} authorID The author ID (e.g., a.aBTGWrPXaOY1R1FD)
+ * @return {Promise<string|null>} The userName or null if not found
+ */
+exports.getUserNameByAuthorId = async (authorID: string): Promise<string | null> => {
+  try {
+    // Search through username2author mappings to find the userName
+    const allKeys = await db.findKeys('username2author:*', null);
+    
+    for (const key of allKeys) {
+      const mappedAuthorId = await db.get(key);
+      if (mappedAuthorId === authorID) {
+        // Extract userName from the key (remove 'username2author:' prefix)
+        return key.substring('username2author:'.length);
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.warn('Error finding userName for authorID:', authorID, error);
+    return null;
+  }
+};
+
+/**
+ * Pure userName-based getAuthorId - NO TOKEN DEPENDENCY
+ * @param {String} userName The username of the user (REQUIRED)
+ * @param {Object} user User settings (optional)
+ * @return {Promise<string>} The authorID
+ */
+exports.getAuthorId = async (userName: string, user?: object): Promise<string> => {
+  if (!userName || userName.trim() === '') {
+    throw new Error('userName is required - token-based authentication is disabled');
+  }
+  
+  console.log(`[NO-TOKEN] Getting authorID for userName: ${userName}`);
+  return await exports.getAuthorIdByUserName(userName);
+};
+
+/**
+ * Pure userName-based author creation - NO TOKEN DEPENDENCY
+ * @param {String} userName The username (REQUIRED)
+ * @param {String} name The display name (optional, defaults to userName)
+ * @return {Promise<{authorID: string}>}
+ */
+exports.createAuthorIfNotExistsForUserName = async (userName: string, name?: string): Promise<{authorID: string}> => {
+  if (!userName || userName.trim() === '') {
+    throw new Error('userName is required - token-based authentication is disabled');
+  }
+  
+  const authorId = await exports.getAuthorIdByUserName(userName);
+  
+  // Update the display name if provided and different
+  if (name && name !== userName) {
+    await exports.setAuthorName(authorId, name);
+  }
+  
+  return { authorID: authorId };
 };
 
 /**

@@ -47,18 +47,28 @@ const init = () => {
     // set the title
     document.title = `${padId.replace(/_+/g, ' ')} | ${document.title}`;
 
-    // ensure we have a token
-    token = Cookies.get('token');
-    if (token == null) {
-      token = `t.${randomString()}`;
-      Cookies.set('token', token, {expires: 60});
+    // PURE USERNAME-BASED: Extract userName from URL parameters (NO TOKEN)
+    const urlParams = new URLSearchParams(window.location.search);
+    const userNameFromUrl = urlParams.get('userName');
+    
+    if (!userNameFromUrl || userNameFromUrl.trim() === '') {
+      // NO userName provided - show error and stop
+      $('body').html('<h2>Error: userName parameter is required</h2><p>Please access with: ?userName=YourName</p>');
+      console.error('[TIMESLIDER-NO-TOKEN] userName parameter is required in URL');
+      return;
     }
+    
+    console.log(`[TIMESLIDER-NO-TOKEN] Using userName from URL: ${userNameFromUrl}`);
 
     socket = socketio.connect(exports.baseURL, '/', {query: {padId}});
 
     // send the ready message once we're connected
     socket.on('connect', () => {
-      sendSocketMsg('CLIENT_READY', {});
+      sendSocketMsg('CLIENT_READY', {
+        userInfo: {
+          name: userNameFromUrl.trim()
+        }
+      });
     });
 
     socket.on('disconnect', (reason) => {
@@ -93,15 +103,15 @@ const init = () => {
   });
 };
 
-// sends a message over the socket
+// sends a message over the socket - PURE USERNAME-BASED (NO TOKEN)
 const sendSocketMsg = (type, data) => {
   socket.emit("message", {
-    component: 'pad', // FIXME: Remove this stupidity!
+    component: 'pad', // Required field for message routing
     type,
     data,
     padId,
-    token,
     sessionID: Cookies.get('sessionID'),
+    // NO TOKEN - pure userName-based system
   });
 };
 
