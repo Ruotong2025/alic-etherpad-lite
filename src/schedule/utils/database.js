@@ -167,19 +167,37 @@ class DatabaseManager {
   // 插入或更新pad版本数据
   async insertPadVersion(data) {
     try {
-      // 先尝试包含change_position字段的插入
+      // 转换timestamp为datetime格式（北京时区 UTC+8）
+      const convertTimestamp = (timestamp) => {
+        if (!timestamp) return null;
+        try {
+          const date = new Date(parseInt(timestamp));
+          // 直接使用原始时间，让MySQL处理时区，然后手动转换为北京时区
+          const utcTime = date.toISOString().slice(0, 19).replace('T', ' ');
+          
+          // 手动计算北京时间（UTC+8）
+          const beijingDate = new Date(date.getTime() + (8 * 60 * 60 * 1000));
+          return beijingDate.toISOString().slice(0, 19).replace('T', ' ');
+        } catch (error) {
+          return null;
+        }
+      };
+
+      const createTime = convertTimestamp(data.timestamp);
+
+      // 先尝试包含change_position和create_time字段的插入
       const queryWithPosition = `
         INSERT INTO etherpad_pad_version 
-        (pad_id, revision, content, author, timestamp, changeset, user_name, change_description, change_position)
+        (pad_id, revision, content, author, timestamp, changeset, change_description, change_position, create_time)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           content = VALUES(content),
           author = VALUES(author),
           timestamp = VALUES(timestamp),
           changeset = VALUES(changeset),
-          user_name = VALUES(user_name),
           change_description = VALUES(change_description),
-          change_position = VALUES(change_position)
+          change_position = VALUES(change_position),
+          create_time = VALUES(create_time)
       `;
       
       await this.connection.execute(queryWithPosition, [
@@ -189,9 +207,9 @@ class DatabaseManager {
         data.author,
         data.timestamp,
         data.changeset,
-        data.userName || null,
         data.changeDescription,
-        data.changePosition || null
+        data.changePosition || null,
+        createTime
       ]);
     } catch (error) {
       // 如果失败（可能是缺少change_position字段），使用不包含该字段的查询
@@ -199,14 +217,13 @@ class DatabaseManager {
         console.warn('⚠️  change_position字段不存在，使用兼容模式插入');
         const queryWithoutPosition = `
           INSERT INTO etherpad_pad_version 
-          (pad_id, revision, content, author, timestamp, changeset, user_name, change_description)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          (pad_id, revision, content, author, timestamp, changeset, change_description)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             content = VALUES(content),
             author = VALUES(author),
             timestamp = VALUES(timestamp),
             changeset = VALUES(changeset),
-            user_name = VALUES(user_name),
             change_description = VALUES(change_description)
         `;
         
@@ -217,7 +234,6 @@ class DatabaseManager {
           data.author,
           data.timestamp,
           data.changeset,
-          data.userName || null,
           data.changeDescription
         ]);
       } else {
@@ -227,51 +243,28 @@ class DatabaseManager {
   }
 
   // 更新pad版本数据
-  async updatePadVersion(data) {
+  async updatePadVersion(padId, revision, data) {
     try {
-      // 先尝试包含change_position字段的更新
-      const queryWithPosition = `
+      const updateQuery = `
         UPDATE etherpad_pad_version 
         SET content = ?, author = ?, timestamp = ?, changeset = ?, 
-            user_name = ?, change_description = ?, change_position = ?
+            change_description = ?, change_position = ?
         WHERE pad_id = ? AND revision = ?
       `;
       
-      await this.connection.execute(queryWithPosition, [
+      await this.connection.execute(updateQuery, [
         data.content || null,
         data.author,
         data.timestamp,
         data.changeset,
-        data.userName || null,
         data.changeDescription,
         data.changePosition || null,
-        data.padId,
-        data.revision
+        padId,
+        revision
       ]);
     } catch (error) {
-      // 如果失败（可能是缺少change_position字段），使用不包含该字段的更新
-      if (error.message.includes('change_position')) {
-        console.warn('⚠️  change_position字段不存在，使用兼容模式更新');
-        const queryWithoutPosition = `
-          UPDATE etherpad_pad_version 
-          SET content = ?, author = ?, timestamp = ?, changeset = ?, 
-              user_name = ?, change_description = ?
-          WHERE pad_id = ? AND revision = ?
-        `;
-        
-        await this.connection.execute(queryWithoutPosition, [
-          data.content || null,
-          data.author,
-          data.timestamp,
-          data.changeset,
-          data.userName || null,
-          data.changeDescription,
-          data.padId,
-          data.revision
-        ]);
-      } else {
-        throw error;
-      }
+      console.error('❌ 更新pad版本失败:', error);
+      throw error;
     }
   }
 
@@ -312,16 +305,15 @@ class DatabaseManager {
   // 获取特定的pad版本记录
   async getPadVersionRecord(padId, revision) {
     try {
-      // 先尝试包含change_position字段的查询
-      const queryWithPosition = `
+      const query = `
         SELECT pad_id, revision, content, author, timestamp, changeset, 
-               user_name, change_description, change_position
+               change_description, change_position
         FROM etherpad_pad_version 
         WHERE pad_id = ? AND revision = ? 
         LIMIT 1
       `;
       
-      const [rows] = await this.connection.execute(queryWithPosition, [padId, revision]);
+      const [rows] = await this.connection.execute(query, [padId, revision]);
       if (rows.length === 0) {
         return null;
       }
@@ -334,42 +326,12 @@ class DatabaseManager {
         author: row.author,
         timestamp: row.timestamp,
         changeset: row.changeset,
-        userName: row.user_name,
         changeDescription: row.change_description,
         changePosition: row.change_position || null
       };
     } catch (error) {
-      // 如果失败（可能是缺少change_position字段），使用不包含该字段的查询
-      if (error.message.includes('change_position')) {
-        console.warn('⚠️  change_position字段不存在，使用兼容模式查询');
-        const queryWithoutPosition = `
-          SELECT pad_id, revision, content, author, timestamp, changeset, 
-                 user_name, change_description
-          FROM etherpad_pad_version 
-          WHERE pad_id = ? AND revision = ? 
-          LIMIT 1
-        `;
-        
-        const [rows] = await this.connection.execute(queryWithoutPosition, [padId, revision]);
-        if (rows.length === 0) {
-          return null;
-        }
-        
-        const row = rows[0];
-        return {
-          padId: row.pad_id,
-          revision: row.revision,
-          content: row.content,
-          author: row.author,
-          timestamp: row.timestamp,
-          changeset: row.changeset,
-          userName: row.user_name,
-          changeDescription: row.change_description,
-          changePosition: null
-        };
-      } else {
-        throw error;
-      }
+      console.error('❌ 获取pad版本记录失败:', error);
+      throw error;
     }
   }
 
@@ -489,7 +451,6 @@ class DatabaseManager {
           author: 'system',
           timestamp: Date.now(),
           changeset: '', // 版本0没有changeset
-          userName: 'system',
           changeDescription: '初始文档状态',
           changePosition: null
         };
@@ -548,66 +509,6 @@ class DatabaseManager {
       throw error;
     }
   }
-
-  // 修复内容重建中的空格问题
-  async fixContentSpacing(padId, revision, content) {
-    if (!content) return content;
-    
-    try {
-      // 移除多余的空格和换行
-      let fixedContent = content
-        .replace(/\s+/g, ' ')           // 多个空格替换为单个空格
-        .replace(/^\s+|\s+$/g, '')      // 移除首尾空格
-        .replace(/\n\s*\n/g, '\n')      // 多个换行替换为单个换行
-        .trim();                        // 最终trim
-      
-      // 如果内容为空但原来不为空，保留一个换行符（Etherpad的默认状态）
-      if (!fixedContent && content.length > 0) {
-        fixedContent = '\n';
-      }
-      
-      return fixedContent;
-    } catch (error) {
-      console.warn(`⚠️  修复内容空格失败 (${padId}:${revision}):`, error);
-      return content; // 返回原内容
-    }
-  }
-
-  // 批量修复内容空格问题
-  async fixAllContentSpacing() {
-    try {
-      const query = `
-        SELECT pad_id, revision, content
-        FROM etherpad_pad_version 
-        WHERE content IS NOT NULL 
-        AND (content LIKE '%  %' OR content LIKE ' %' OR content LIKE '% ')
-        ORDER BY pad_id, revision
-      `;
-      
-      const [rows] = await this.connection.execute(query);
-      console.log(`📊 发现 ${rows.length} 个记录需要修复空格问题`);
-      
-      let fixedCount = 0;
-      for (const row of rows) {
-        const fixedContent = await this.fixContentSpacing(row.pad_id, row.revision, row.content);
-        
-        if (fixedContent !== row.content) {
-          await this.updateContentOnly(row.pad_id, row.revision, fixedContent);
-          fixedCount++;
-          
-          if (fixedCount % 100 === 0) {
-            console.log(`📝 已修复 ${fixedCount} 个记录的空格问题`);
-          }
-        }
-      }
-      
-      console.log(`✅ 共修复了 ${fixedCount} 个记录的空格问题`);
-      return fixedCount;
-    } catch (error) {
-      console.error('❌ 批量修复空格问题失败:', error);
-      throw error;
-    }
-  }
 }
 
-module.exports = DatabaseManager; 
+module.exports = DatabaseManager;

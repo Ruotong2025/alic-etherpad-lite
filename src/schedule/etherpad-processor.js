@@ -50,7 +50,6 @@ class EtherpadProcessor {
           author: existingData.author,
           timestamp: existingData.timestamp,
           changeset: existingData.changeset,
-          userName: existingData.userName,
           changeDescription: existingData.changeDescription, // 保留原有描述
           changePosition: existingData.changePosition // 保留原有位置
         };
@@ -70,7 +69,6 @@ class EtherpadProcessor {
           author: meta.author,
           timestamp: meta.timestamp,
           changeset: changeset,
-          userName: null,
           changeDescription: analysis.change_description || analysis.summary,
           changePosition: analysis.change_position || null
         };
@@ -317,7 +315,6 @@ class EtherpadProcessor {
               author: 'system',
               timestamp: Date.now(),
               changeset: '',
-              userName: 'system',
               changeDescription: '初始文档状态',
               changePosition: null
             });
@@ -372,7 +369,6 @@ class EtherpadProcessor {
                   author: padData.revisions.find(r => r.revision === revision)?.author || 'unknown',
                   timestamp: padData.revisions.find(r => r.revision === revision)?.timestamp || Date.now(),
                   changeset: changeset,
-                  userName: null,
                   changeDescription: '内容重建',
                   changePosition: changePosition
                 });
@@ -469,11 +465,29 @@ class EtherpadProcessor {
           const exists = await this.db.checkRecordExists(padId, 0);
           
           if (exists) {
+            // 转换timestamp为datetime格式（北京时区 UTC+8）
+            const convertTimestamp = (timestamp) => {
+              if (!timestamp) return null;
+              try {
+                const date = new Date(parseInt(timestamp));
+                // 直接使用原始时间，让MySQL处理时区，然后手动转换为北京时区
+                const utcTime = date.toISOString().slice(0, 19).replace('T', ' ');
+                
+                // 手动计算北京时间（UTC+8）
+                const beijingDate = new Date(date.getTime() + (8 * 60 * 60 * 1000));
+                return beijingDate.toISOString().slice(0, 19).replace('T', ' ');
+              } catch (error) {
+                return null;
+              }
+            };
+
+            const createTime = convertTimestamp(storeValue.meta.timestamp);
+
             // 更新现有记录
             await this.db.connection.execute(`
               UPDATE etherpad_pad_version 
               SET content = ?, changeset = ?, author = ?, timestamp = ?, 
-                  change_description = ?, change_position = ?
+                  change_description = ?, change_position = ?, create_time = ?
               WHERE pad_id = ? AND revision = 0
             `, [
               version0Data.content, 
@@ -482,6 +496,7 @@ class EtherpadProcessor {
               storeValue.meta.timestamp,
               analysis.summary || '版本0初始内容',
               changePosition || null,
+              createTime,
               padId
             ]);
             console.log(`✅ 已更新 ${padId} 的版本0记录 (${version0Data.content.length}字符) 位置: ${changePosition || '无'}`);
@@ -494,7 +509,6 @@ class EtherpadProcessor {
               author: storeValue.meta.author,
               timestamp: storeValue.meta.timestamp,
               changeset: storeValue.changeset,
-              userName: null,
               changeDescription: analysis.summary || '版本0初始内容',
               changePosition: changePosition || null
             });
@@ -542,9 +556,28 @@ class EtherpadProcessor {
           }
           
           const changeset = padData.revisions.find(r => r.revision === revision)?.changeset;
-          if (!changeset) continue;
+          const changesetRecord = padData.revisions.find(r => r.revision === revision);
+          if (!changeset || !changesetRecord) continue;
           
           try {
+            // 转换timestamp为datetime格式（北京时区 UTC+8）
+            const convertTimestamp = (timestamp) => {
+              if (!timestamp) return null;
+              try {
+                const date = new Date(parseInt(timestamp));
+                // 直接使用原始时间，让MySQL处理时区，然后手动转换为北京时区
+                const utcTime = date.toISOString().slice(0, 19).replace('T', ' ');
+                
+                // 手动计算北京时间（UTC+8）
+                const beijingDate = new Date(date.getTime() + (8 * 60 * 60 * 1000));
+                return beijingDate.toISOString().slice(0, 19).replace('T', ' ');
+              } catch (error) {
+                return null;
+              }
+            };
+
+            const createTime = convertTimestamp(changesetRecord.timestamp);
+
             // 检查记录是否存在
             const exists = await this.db.checkRecordExists(padId, revision);
             
@@ -606,6 +639,12 @@ class EtherpadProcessor {
                 updateFields.push('change_position = ?');
                 updateParams.push(changePosition);
               }
+
+              // 总是更新create_time字段
+              if (createTime) {
+                updateFields.push('create_time = ?');
+                updateParams.push(createTime);
+              }
               
               // 只有在有字段需要更新时才执行更新
               if (updateFields.length > 1) { // 大于1因为content总是会更新
@@ -623,12 +662,22 @@ class EtherpadProcessor {
                   console.log(`📊 内容重建进度: ${operationCount} 个版本已更新`);
                 }
               } else {
-                // 只更新content
+                // 只更新content和create_time
+                const simpleUpdateFields = ['content = ?'];
+                const simpleUpdateParams = [contentInfo.content];
+                
+                if (createTime) {
+                  simpleUpdateFields.push('create_time = ?');
+                  simpleUpdateParams.push(createTime);
+                }
+                
+                simpleUpdateParams.push(padId, revision);
+                
                 await this.db.connection.execute(`
                   UPDATE etherpad_pad_version 
-                  SET content = ?
+                  SET ${simpleUpdateFields.join(', ')}
                   WHERE pad_id = ? AND revision = ?
-                `, [contentInfo.content, padId, revision]);
+                `, simpleUpdateParams);
                 
                 updatedVersions++;
                 operationCount++;
@@ -731,7 +780,6 @@ class EtherpadProcessor {
           author: 'system',
           timestamp: Date.now(),
           changeset: '',
-          userName: 'system',
           changeDescription: '初始文档状态',
           changePosition: null
         });
@@ -786,7 +834,6 @@ class EtherpadProcessor {
               author: padData.revisions.find(r => r.revision === revision)?.author || 'unknown',
               timestamp: padData.revisions.find(r => r.revision === revision)?.timestamp || Date.now(),
               changeset: changeset,
-              userName: null,
               changeDescription: '内容重建',
               changePosition: changePosition
             });
