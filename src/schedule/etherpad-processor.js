@@ -563,14 +563,9 @@ class EtherpadProcessor {
               
               if (existingRows.length > 0) {
                 const existing = existingRows[0];
-                // 只有当现有数据为空、null或默认值时才更新
-                shouldUpdateDescription = !existing.change_description || 
-                                        existing.change_description === '内容重建' ||
-                                        existing.change_description === 'null' ||
-                                        existing.change_description.trim() === '';
-                                        
-                shouldUpdatePosition = !existing.change_position || 
-                                     existing.change_position === 'null';
+                // 强制更新changeset分析，确保使用正确的baseDocument
+                shouldUpdateDescription = true;
+                shouldUpdatePosition = true;
               }
               
               // 只有在需要更新时才进行changeset分析

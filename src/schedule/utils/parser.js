@@ -381,8 +381,19 @@ function formatChangesSummary(changes) {
   
   changes.forEach(change => {
     if (change.content.trim()) {
-      // 只显示变更类型和内容，不包含位置信息
+      // 有可见内容
       summaryParts.push(`${change.type} "${change.content}"`);
+    } else if (change.content.length > 0) {
+      // 处理不可见字符（换行符、空格等）
+      let invisibleDesc = '';
+      if (change.content.includes('\n')) {
+        invisibleDesc = '换行符';
+      } else if (change.content === ' ') {
+        invisibleDesc = '空格';
+      } else {
+        invisibleDesc = '不可见字符';
+      }
+      summaryParts.push(`${change.type} "${invisibleDesc}"`);
     }
   });
   
@@ -489,15 +500,23 @@ class ContentReconstructor {
     // 初始化版本0
     let currentState = new DocumentState('');
     
-    // 如果有版本0，使用其内容作为初始状态
+    // 查找版本0并处理其changeset
     const version0 = sortedRevisions.find(r => r.revision === 0);
-    if (version0 && version0.content !== undefined) {
-      currentState = new DocumentState(version0.content);
-      results.set(0, {
-        content: version0.content,
-        length: version0.content.length,
-        error: null
-      });
+    if (version0 && version0.changeset) {
+      // 应用版本0的changeset到空文档
+      if (currentState.applyChangeset(version0.changeset)) {
+        results.set(0, {
+          content: currentState.text,
+          length: currentState.text.length,
+          error: null
+        });
+      } else {
+        results.set(0, {
+          content: '',
+          length: 0,
+          error: '版本0 changeset应用失败'
+        });
+      }
     } else {
       // 没有版本0，使用空文档
       results.set(0, {
