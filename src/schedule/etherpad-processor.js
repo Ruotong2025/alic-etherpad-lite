@@ -40,7 +40,7 @@ class EtherpadProcessor {
       let insertData;
 
       if (existingRecord) {
-        // 如果记录已存在，只更新content字段（如果为空），保留原有的change_description和change_position
+        // 如果记录已存在，只更新content字段（如果为空），保留原有的字段
         const existingData = await this.db.getPadVersionRecord(padInfo.padId, padInfo.revision);
         
         insertData = {
@@ -50,8 +50,9 @@ class EtherpadProcessor {
           author: existingData.author,
           timestamp: existingData.timestamp,
           changeset: existingData.changeset,
-          changeDescription: existingData.changeDescription, // 保留原有描述
-          changePosition: existingData.changePosition // 保留原有位置
+          changeBehavior: existingData.change_behavior,
+          changeContent: existingData.change_content,
+          changePosition: existingData.change_position
         };
       } else {
         // 新记录，进行完整的changeset分析
@@ -69,7 +70,8 @@ class EtherpadProcessor {
           author: meta.author,
           timestamp: meta.timestamp,
           changeset: changeset,
-          changeDescription: analysis.change_description || analysis.summary,
+          changeBehavior: analysis.change_behavior,
+          changeContent: analysis.change_content,
           changePosition: analysis.change_position || null
         };
       }
@@ -79,7 +81,8 @@ class EtherpadProcessor {
       if (showDetails) {
         console.log(`📝 ${existingRecord ? '更新' : '新增'}: ${padInfo.padId}:rev${padInfo.revision}`);
         if (!existingRecord) {
-          console.log(`   变更: ${insertData.changeDescription}`);
+          console.log(`   行为: ${insertData.changeBehavior || '未知'}`);
+          console.log(`   内容: ${insertData.changeContent || '无'}`);
           console.log(`   位置: ${insertData.changePosition || '无'}`);
         }
       }
@@ -322,8 +325,9 @@ class EtherpadProcessor {
               author: 'system',
               timestamp: Date.now(),
               changeset: '',
-              changeDescription: '初始文档状态',
-              changePosition: null
+              changeBehavior: 'add', // 初始状态视为添加
+              changeContent: version0Info.content || '',
+                        changePosition: null
             });
             console.log(`📝 准备插入版本0: "${version0Info.content || ''}" (${(version0Info.content || '').length}字符)`);
           }
@@ -376,7 +380,8 @@ class EtherpadProcessor {
                   author: padData.revisions.find(r => r.revision === revision)?.author || 'unknown',
                   timestamp: padData.revisions.find(r => r.revision === revision)?.timestamp || Date.now(),
                   changeset: changeset,
-                  changeDescription: '内容重建',
+                  changeBehavior: null, // 内容重建无法确定具体行为
+                  changeContent: null, // 内容重建无法确定具体内容
                   changePosition: changePosition
                 });
               }
@@ -494,14 +499,15 @@ class EtherpadProcessor {
             await this.db.connection.execute(`
               UPDATE etherpad_pad_version 
               SET content = ?, changeset = ?, author = ?, timestamp = ?, 
-                  change_description = ?, change_position = ?, create_time = ?
+                  change_behavior = ?, change_content = ?, change_position = ?, create_time = ?
               WHERE pad_id = ? AND revision = 0
             `, [
               version0Data.content, 
               storeValue.changeset,
               storeValue.meta.author,
               storeValue.meta.timestamp,
-              analysis.summary || '版本0初始内容',
+              analysis.change_behavior || 'add',
+              analysis.change_content || version0Data.content,
               changePosition || null,
               createTime,
               padId
@@ -516,7 +522,8 @@ class EtherpadProcessor {
               author: storeValue.meta.author,
               timestamp: storeValue.meta.timestamp,
               changeset: storeValue.changeset,
-              changeDescription: analysis.summary || '版本0初始内容',
+              changeBehavior: analysis.change_behavior || 'add', // 版本0通常是添加
+              changeContent: analysis.change_content || version0Data.content,
               changePosition: changePosition || null
             });
             console.log(`✅ 已插入 ${padId} 的版本0记录 (${version0Data.content.length}字符) 位置: ${changePosition || '无'}`);
@@ -591,25 +598,24 @@ class EtherpadProcessor {
             if (exists) {
               // 获取现有记录，检查是否已有正确的changeset分析
               const [existingRows] = await this.db.connection.execute(`
-                SELECT change_description, change_position 
+                SELECT change_behavior, change_content, change_position
                 FROM etherpad_pad_version 
                 WHERE pad_id = ? AND revision = ?
               `, [padId, revision]);
               
-              let shouldUpdateDescription = false;
-              let shouldUpdatePosition = false;
-              let changeDescription = null;
+              let shouldUpdateFields = false;
+              let changeBehavior = null;
+              let changeContent = null;
               let changePosition = null;
               
               if (existingRows.length > 0) {
                 const existing = existingRows[0];
                 // 强制更新changeset分析，确保使用正确的baseDocument
-                shouldUpdateDescription = true;
-                shouldUpdatePosition = true;
+                shouldUpdateFields = true;
               }
               
               // 只有在需要更新时才进行changeset分析
-              if (revision > 0 && (shouldUpdateDescription || shouldUpdatePosition)) {
+              if (revision > 0 && shouldUpdateFields) {
                 try {
                   // 获取前一个版本的内容作为基础文档
                   let baseDocument = '';
@@ -622,10 +628,9 @@ class EtherpadProcessor {
                   
                   const analysis = analyzeChangesetContent(changeset, baseDocument);
                   
-                  if (shouldUpdateDescription) {
-                    changeDescription = analysis.change_description || analysis.summary || null;
-                  }
-                  if (shouldUpdatePosition) {
+                  if (shouldUpdateFields) {
+                    changeBehavior = analysis.change_behavior;
+                    changeContent = analysis.change_content;
                     changePosition = analysis.change_position || null;
                   }
                 } catch (analysisError) {
@@ -637,14 +642,19 @@ class EtherpadProcessor {
               const updateFields = ['content = ?'];
               const updateParams = [contentInfo.content];
               
-              if (shouldUpdateDescription && changeDescription !== null) {
-                updateFields.push('change_description = ?');
-                updateParams.push(changeDescription);
-              }
-              
-              if (shouldUpdatePosition && changePosition !== null) {
-                updateFields.push('change_position = ?');
-                updateParams.push(changePosition);
+              if (shouldUpdateFields) {
+                if (changeBehavior !== null) {
+                  updateFields.push('change_behavior = ?');
+                  updateParams.push(changeBehavior);
+                }
+                if (changeContent !== null) {
+                  updateFields.push('change_content = ?');
+                  updateParams.push(changeContent);
+                }
+                if (changePosition !== null) {
+                  updateFields.push('change_position = ?');
+                  updateParams.push(changePosition);
+                }
               }
 
               // 总是更新create_time字段
@@ -787,7 +797,8 @@ class EtherpadProcessor {
           author: 'system',
           timestamp: Date.now(),
           changeset: '',
-          changeDescription: '初始文档状态',
+          changeBehavior: 'add', // 初始状态视为添加
+          changeContent: version0Info.content || '',
           changePosition: null
         });
         console.log(`📝 准备插入版本0: "${version0Info.content || ''}" (${(version0Info.content || '').length}字符)`);
@@ -841,7 +852,8 @@ class EtherpadProcessor {
               author: padData.revisions.find(r => r.revision === revision)?.author || 'unknown',
               timestamp: padData.revisions.find(r => r.revision === revision)?.timestamp || Date.now(),
               changeset: changeset,
-              changeDescription: '内容重建',
+              changeBehavior: null, // 内容重建无法确定具体行为
+              changeContent: null, // 内容重建无法确定具体内容
               changePosition: changePosition
             });
           }

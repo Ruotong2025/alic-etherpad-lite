@@ -189,8 +189,9 @@ function analyzeChangesetContent(changeset, baseDocument = '') {
         changes: [],
         summary: '空changeset',
         lengthChange: 0,
-        change_description: '空changeset',
-        change_position: null
+        change_position: null,
+        change_behavior: null,
+        change_content: null
       };
     }
 
@@ -274,41 +275,37 @@ function analyzeChangesetContent(changeset, baseDocument = '') {
               wordIndex: insertPos.wordIndex
             });
           } else if (content.length > 0) {
-            // 只有不可见字符（换行符、空格等）
-            let invisibleDesc = '';
-            if (content.includes('\n')) {
-              invisibleDesc = '换行符';
-            } else if (content === ' ') {
-              invisibleDesc = '空格';
-            } else {
-              invisibleDesc = '不可见字符';
-            }
-            
+            // 不可见字符（换行符、空格等）保留原始符号
             changes.push({
               type: changeType,
-              content: invisibleDesc,
+              content: content, // 直接保留原始内容，不转换成文字描述
               position: `第${insertPos.line}行第${insertPos.wordIndex}个词`,
               line: insertPos.line,
               wordIndex: insertPos.wordIndex
             });
           } else if (op.chars > 0 && charBankIndex + op.chars > charBank.length) {
-            // 特殊情况：charBank为空但要添加字符，通常是换行符
+            // 特殊情况：charBank为空但要添加字符，尝试推断内容
             let implicitContent = '';
             if (op.lines > 0) {
-              implicitContent = `${op.lines}个换行符`;
+              // 如果有行数信息，添加对应数量的换行符
+              implicitContent = '\n'.repeat(op.lines);
             } else if (op.chars === 1) {
-              implicitContent = '换行符或空格';
+              // 单个字符，可能是换行符或空格，默认为换行符
+              implicitContent = '\n';
             } else {
-              implicitContent = `${op.chars}个隐式字符`;
+              // 多个隐式字符，无法确定具体内容，保留空字符串
+              implicitContent = '';
             }
             
-            changes.push({
-              type: changeType,
-              content: implicitContent,
-              position: `第${insertPos.line}行第${insertPos.wordIndex}个词`,
-              line: insertPos.line,
-              wordIndex: insertPos.wordIndex
-            });
+            if (implicitContent) {
+              changes.push({
+                type: changeType,
+                content: implicitContent,
+                position: `第${insertPos.line}行第${insertPos.wordIndex}个词`,
+                line: insertPos.line,
+                wordIndex: insertPos.wordIndex
+              });
+            }
           }
           
           charBankIndex += op.chars;
@@ -351,12 +348,17 @@ function analyzeChangesetContent(changeset, baseDocument = '') {
       primaryPosition = '第1行第1个词 (未能精确定位)';
     }
     
+    // 分析主要的变更行为和内容
+    const primaryChange = analyzePrimaryChange(changes);
+    
     return {
       changes,
       summary: formatChangesSummary(changes),
       lengthChange: header.lengthChange,
-      change_description: formatChangesSummary(changes),
-      change_position: primaryPosition
+      change_position: primaryPosition,
+      // 新字段
+      change_behavior: primaryChange.behavior,
+      change_content: primaryChange.content
     };
     
   } catch (error) {
@@ -365,10 +367,42 @@ function analyzeChangesetContent(changeset, baseDocument = '') {
       changes: [],
       summary: '解析失败',
       lengthChange: 0,
-      change_description: '解析失败',
-      change_position: null
+      change_position: null,
+      change_behavior: null,
+      change_content: null
     };
   }
+}
+
+// 分析主要的变更行为和内容
+function analyzePrimaryChange(changes) {
+  if (changes.length === 0) {
+    return { behavior: null, content: null };
+  }
+  
+  // 找到第一个变更作为主要变更
+  const primaryChange = changes[0];
+  
+  if (!primaryChange) {
+    return { behavior: null, content: null };
+  }
+  
+  // 确定行为类型
+  let behavior = null;
+  if (primaryChange.type === '增加') {
+    behavior = 'add';
+  } else if (primaryChange.type === '减少') {
+    behavior = 'delete';
+  }
+  
+  // 提取内容，保留原始符号（包括换行符、标点符号等）
+  let content = primaryChange.content;
+  if (content) {
+    // 不进行任何转换，直接保留原始内容
+    // 换行符、空格、标点符号等都保持原样
+  }
+  
+  return { behavior, content };
 }
 
 // 格式化变更摘要
@@ -380,20 +414,9 @@ function formatChangesSummary(changes) {
   const summaryParts = [];
   
   changes.forEach(change => {
-    if (change.content.trim()) {
-      // 有可见内容
+    if (change.content && change.content.length > 0) {
+      // 所有内容都直接显示，包括换行符、空格等不可见字符
       summaryParts.push(`${change.type} "${change.content}"`);
-    } else if (change.content.length > 0) {
-      // 处理不可见字符（换行符、空格等）
-      let invisibleDesc = '';
-      if (change.content.includes('\n')) {
-        invisibleDesc = '换行符';
-      } else if (change.content === ' ') {
-        invisibleDesc = '空格';
-      } else {
-        invisibleDesc = '不可见字符';
-      }
-      summaryParts.push(`${change.type} "${invisibleDesc}"`);
     }
   });
   

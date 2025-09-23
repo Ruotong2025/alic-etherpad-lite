@@ -198,60 +198,36 @@ class DatabaseManager {
 
       const createTime = convertTimestamp(data.timestamp);
 
-      // 先尝试包含change_position和create_time字段的插入
-      const queryWithPosition = `
+      // 先尝试包含新字段结构的插入
+      const queryWithNewFields = `
         INSERT INTO etherpad_pad_version 
-        (pad_id, revision, content, author, timestamp, changeset, change_description, change_position, create_time)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (pad_id, revision, content, change_behavior, change_content, change_position, author, timestamp, changeset, create_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           content = VALUES(content),
+          change_behavior = VALUES(change_behavior),
+          change_content = VALUES(change_content),
+          change_position = VALUES(change_position),
           author = VALUES(author),
           timestamp = VALUES(timestamp),
           changeset = VALUES(changeset),
-          change_description = VALUES(change_description),
-          change_position = VALUES(change_position),
           create_time = VALUES(create_time)
       `;
       
-      await this.connection.execute(queryWithPosition, [
+      await this.connection.execute(queryWithNewFields, [
         data.padId,
         data.revision,
         data.content || null,
+        data.changeBehavior || null,
+        data.changeContent || null,
+        data.changePosition || null,
         data.author,
         data.timestamp,
         data.changeset,
-        data.changeDescription,
-        data.changePosition || null,
         createTime
       ]);
     } catch (error) {
-      // 如果失败（可能是缺少change_position字段），使用不包含该字段的查询
-      if (error.message.includes('change_position')) {
-        console.warn('⚠️  change_position字段不存在，使用兼容模式插入');
-        const queryWithoutPosition = `
-          INSERT INTO etherpad_pad_version 
-          (pad_id, revision, content, author, timestamp, changeset, change_description)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-          ON DUPLICATE KEY UPDATE
-            content = VALUES(content),
-            author = VALUES(author),
-            timestamp = VALUES(timestamp),
-            changeset = VALUES(changeset),
-            change_description = VALUES(change_description)
-        `;
-        
-        await this.connection.execute(queryWithoutPosition, [
-          data.padId,
-          data.revision,
-          data.content || null,
-          data.author,
-          data.timestamp,
-          data.changeset,
-          data.changeDescription
-        ]);
-      } else {
-        throw error;
-      }
+      throw error;
     }
   }
 
@@ -319,8 +295,8 @@ class DatabaseManager {
   async getPadVersionRecord(padId, revision) {
     try {
       const query = `
-        SELECT pad_id, revision, content, author, timestamp, changeset, 
-               change_description, change_position
+        SELECT pad_id, revision, content, change_behavior, change_content, change_position,
+               author, timestamp, changeset
         FROM etherpad_pad_version 
         WHERE pad_id = ? AND revision = ? 
         LIMIT 1
@@ -336,11 +312,12 @@ class DatabaseManager {
         padId: row.pad_id,
         revision: row.revision,
         content: row.content,
+        change_behavior: row.change_behavior,
+        change_content: row.change_content,
+        change_position: row.change_position || null,
         author: row.author,
         timestamp: row.timestamp,
-        changeset: row.changeset,
-        changeDescription: row.change_description,
-        changePosition: row.change_position || null
+        changeset: row.changeset
       };
     } catch (error) {
       console.error('❌ 获取pad版本记录失败:', error);
@@ -464,7 +441,8 @@ class DatabaseManager {
           author: 'system',
           timestamp: Date.now(),
           changeset: '', // 版本0没有changeset
-          changeDescription: '初始文档状态',
+          changeBehavior: 'add', // 初始状态视为添加
+          changeContent: '',
           changePosition: null
         };
         
