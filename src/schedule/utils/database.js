@@ -164,6 +164,19 @@ class DatabaseManager {
     return rows;
   }
 
+  // 获取所有 globalAuthor 数据
+  async getGlobalAuthorData() {
+    const query = `
+      SELECT \`key\`, \`value\` 
+      FROM store 
+      WHERE \`key\` LIKE 'globalAuthor:%'
+      ORDER BY \`key\`
+    `;
+    
+    const [rows] = await this.connection.execute(query);
+    return rows;
+  }
+
   // 插入或更新pad版本数据
   async insertPadVersion(data) {
     try {
@@ -506,6 +519,62 @@ class DatabaseManager {
       return createdCount;
     } catch (error) {
       console.error('❌ 批量创建版本0失败:', error);
+      throw error;
+    }
+  }
+
+  // 清空 etherpad_author 表
+  async clearAuthorTable() {
+    try {
+      const query = 'DELETE FROM etherpad_author';
+      await this.connection.execute(query);
+      console.log('🗑️ etherpad_author 表已清空');
+    } catch (error) {
+      console.error('❌ 清空 etherpad_author 表失败:', error);
+      throw error;
+    }
+  }
+
+  // 插入作者数据到 etherpad_author 表
+  async insertAuthorData(authorData) {
+    try {
+      const query = `
+        INSERT INTO etherpad_author 
+        (author_id, author_name, color_id, timestamp, created_time, padIDs)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `;
+      
+      await this.connection.execute(query, [
+        authorData.author_id,
+        authorData.author_name,
+        authorData.color_id,
+        authorData.timestamp,
+        authorData.created_time,
+        authorData.padIDs
+      ]);
+      
+    } catch (error) {
+      console.error(`❌ 插入作者数据失败 (${authorData.author_id}):`, error);
+      throw error;
+    }
+  }
+
+  // 获取作者统计信息
+  async getAuthorStats() {
+    try {
+      const query = `
+        SELECT 
+          COUNT(*) as total_authors,
+          COUNT(CASE WHEN author_name IS NOT NULL THEN 1 END) as named_authors,
+          COUNT(CASE WHEN padIDs IS NOT NULL THEN 1 END) as authors_with_pads
+        FROM etherpad_author
+      `;
+      
+      const [rows] = await this.connection.execute(query);
+      return rows[0];
+      
+    } catch (error) {
+      console.error('❌ 获取作者统计信息失败:', error);
       throw error;
     }
   }

@@ -210,6 +210,11 @@ class EtherpadProcessor {
       const contentResult = await this.reconstructContentForProcessedData(storeData);
       console.log(`✅ [${taskId}] 内容重建完成: 处理${contentResult.totalPads}个pad, 更新${contentResult.updatedVersions}个版本`);
 
+      // 自动进行作者数据同步
+      console.log(`👥 [${taskId}] 开始同步作者数据...`);
+      const authorResult = await this.syncAuthorData();
+      console.log(`✅ [${taskId}] 作者数据同步完成: 处理${authorResult.total}个作者, 成功${authorResult.processed}个, 错误${authorResult.errors}个`);
+
       return {
         success: true,
         taskId,
@@ -218,7 +223,9 @@ class EtherpadProcessor {
         inserted: insertedCount,
         updated: updatedCount,
         errors: errorCount,
-        contentRebuilt: contentResult.updatedVersions
+        contentRebuilt: contentResult.updatedVersions,
+        authorsSynced: authorResult.processed,
+        authorErrors: authorResult.errors
       };
 
     } catch (error) {
@@ -891,6 +898,146 @@ class EtherpadProcessor {
       await this.disconnect();
     }
   }
+
+  // 同步作者数据到 etherpad_author 表
+  async syncAuthorData() {
+    const taskId = generateTaskId();
+    console.log(`👥 [${taskId}] 开始同步作者数据到 etherpad_author 表...`);
+
+    try {
+      // 获取所有 globalAuthor 数据
+      const globalAuthorData = await this.db.getGlobalAuthorData();
+      console.log(`📊 找到 ${globalAuthorData.length} 个 globalAuthor 记录`);
+
+      if (globalAuthorData.length === 0) {
+        console.log('✅ 没有需要同步的作者数据');
+        return { success: true, processed: 0, inserted: 0, updated: 0, errors: 0 };
+      }
+
+      // 清空现有的 etherpad_author 表（全量更新）
+      await this.db.clearAuthorTable();
+      console.log('🗑️ 已清空 etherpad_author 表，准备全量更新');
+
+      let processedCount = 0;
+      let insertedCount = 0;
+      let errorCount = 0;
+
+      // 处理每个作者数据
+      for (const authorRecord of globalAuthorData) {
+        try {
+          const result = await this.processAuthorRecord(authorRecord);
+          
+          if (result.success) {
+            processedCount++;
+            insertedCount++;
+            
+            if (processedCount <= 5) {
+              console.log(`👤 处理作者: ${result.authorData.author_name || '未命名'} (${result.authorData.author_id})`);
+            }
+          } else {
+            errorCount++;
+            console.error(`❌ 处理作者记录失败: ${authorRecord.key} - ${result.reason}`);
+          }
+
+          // 显示进度
+          if (processedCount % 50 === 0 && processedCount > 0) {
+            console.log(`📈 已处理 ${processedCount}/${globalAuthorData.length} 个作者记录...`);
+          }
+
+        } catch (error) {
+          errorCount++;
+          console.error(`❌ 处理作者记录异常: ${authorRecord.key}`, error.message);
+        }
+      }
+
+      console.log(`✅ [${taskId}] 作者数据同步完成!`);
+      console.log(`📊 统计: 总计${globalAuthorData.length}, 成功${processedCount}, 新增${insertedCount}, 错误${errorCount}`);
+
+      return {
+        success: true,
+        taskId,
+        total: globalAuthorData.length,
+        processed: processedCount,
+        inserted: insertedCount,
+        updated: 0, // 全量更新，所以都是插入
+        errors: errorCount
+      };
+
+    } catch (error) {
+      console.error(`❌ [${taskId}] 作者数据同步失败:`, error);
+      return { success: false, error: error.message, taskId };
+    }
+  }
+
+  // 处理单个作者记录
+  async processAuthorRecord(authorRecord) {
+    try {
+      // 解析 globalAuthor 键，提取 author_id
+      const keyMatch = authorRecord.key.match(/^globalAuthor:(.+)$/);
+      if (!keyMatch) {
+        return { success: false, reason: 'Invalid globalAuthor key format' };
+      }
+
+      const authorId = keyMatch[1];
+      
+      // 解析作者数据
+      const authorData = JSON.parse(authorRecord.value);
+      
+      // 转换时间戳为 datetime 格式（北京时区 UTC+8）
+      const convertTimestamp = (timestamp) => {
+        if (!timestamp) return null;
+        try {
+          const date = new Date(parseInt(timestamp));
+          // 手动计算北京时间（UTC+8）
+          const beijingDate = new Date(date.getTime() + (8 * 60 * 60 * 1000));
+          return beijingDate.toISOString().slice(0, 19).replace('T', ' ');
+        } catch (error) {
+          return null;
+        }
+      };
+
+      const createdTime = convertTimestamp(authorData.timestamp);
+
+      // 处理 padIDs - 如果是字符串则转换为 JSON 对象
+      let padIDsJson = null;
+      if (authorData.padIDs) {
+        if (typeof authorData.padIDs === 'string') {
+          // 如果是字符串，尝试解析或创建简单对象
+          try {
+            padIDsJson = JSON.parse(authorData.padIDs);
+          } catch (e) {
+            // 如果解析失败，将字符串作为单个 pad ID 处理
+            padIDsJson = { [authorData.padIDs]: 1 };
+          }
+        } else if (typeof authorData.padIDs === 'object') {
+          padIDsJson = authorData.padIDs;
+        }
+      }
+
+      // 构建要插入的作者数据
+      const insertData = {
+        author_id: authorId,
+        author_name: authorData.name || null,
+        color_id: authorData.colorId !== undefined ? String(authorData.colorId) : null,
+        timestamp: new Date(), // 当前时间作为修改时间
+        created_time: createdTime,
+        padIDs: padIDsJson ? JSON.stringify(padIDsJson) : null
+      };
+
+      // 插入到 etherpad_author 表
+      await this.db.insertAuthorData(insertData);
+
+      return { 
+        success: true, 
+        authorData: insertData
+      };
+
+    } catch (error) {
+      return { success: false, reason: error.message };
+    }
+  }
+
+
 }
 
 // 命令行入口
@@ -941,10 +1088,10 @@ async function main() {
     console.log('');
     console.log('功能说明:');
     console.log('  --run/--scheduled: 处理前一天整天(00:00-23:59)的数据，包含changeset分析和内容重建');
-    console.log('  --process-all: 处理store表中所有pad数据，包含changeset分析和内容重建');
+    console.log('  --process-all: 处理store表中所有pad数据，包含changeset分析、内容重建和作者同步');
     console.log('  --test: 测试模式，显示详细结果');
     console.log('');
-    console.log('注意: 所有处理流程都会自动进行内容重建，无需单独执行');
+    console.log('注意: --process-all 会自动执行数据处理、内容重建和作者数据同步');
   }
 }
 
