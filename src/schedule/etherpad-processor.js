@@ -6,8 +6,9 @@
 const mysql = require('mysql2/promise');
 const Database = require('./utils/database.js');
 const { parseAndGroupByPad, formatParseReport } = require('./utils/json-parser.js');
-const { analyzeChangesetContent, ContentReconstructor, extractPadInfo } = require('./utils/parser.js');
+const { analyzeChangesetContent, ContentReconstructor, extractPadInfo, extractPadBasicInfo, parsePadData } = require('./utils/parser.js');
 const { calculateTimeRange, getYesterday, formatTime, generateTaskId } = require('./utils/scheduler');
+const { convertTimestampToBeijingTime } = require('./utils/timeConverter.js');
 
 class EtherpadProcessor {
   constructor() {
@@ -20,6 +21,54 @@ class EtherpadProcessor {
 
   async disconnect() {
     await this.db.disconnect();
+  }
+
+  // 处理单个pad基础信息记录
+  async processPadInfo(row, showDetails = false) {
+    const padInfo = extractPadBasicInfo(row.key);
+    if (!padInfo) {
+      return { success: false, reason: 'Invalid pad basic info' };
+    }
+
+    try {
+      const padData = parsePadData(row.value);
+      if (!padData) {
+        return { success: false, reason: 'Failed to parse pad data' };
+      }
+
+      // 检查记录是否已存在
+      const existingRecord = await this.db.checkPadInfoExists(padInfo.padId);
+
+      const insertData = {
+        padId: padInfo.padId,
+        fullText: padData.fullText,
+        attribs: padData.attribs,
+        pool: padData.pool,
+        nextNum: padData.nextNum,
+        head: padData.head,
+        chatHead: padData.chatHead,
+        publicStatus: padData.publicStatus,
+        savedRevisions: padData.savedRevisions
+      };
+
+      await this.db.insertPadInfo(insertData);
+
+      if (showDetails) {
+        console.log(`📝 ${existingRecord ? '更新' : '新增'}: ${padInfo.padId}`);
+      }
+
+      return {
+        success: true,
+        isNewRecord: !existingRecord,
+        padId: padInfo.padId,
+        head: padData.head,
+        textLength: padData.fullText ? padData.fullText.length : 0,
+        authorCount: padData.pool && padData.pool.numToAttrib ? Object.keys(padData.pool.numToAttrib).length : 0
+      };
+    } catch (error) {
+      console.error(`❌ 处理pad基础信息失败 ${padInfo.padId}:`, error);
+      return { success: false, reason: error.message };
+    }
   }
 
   // 处理单个changeset记录
@@ -80,11 +129,6 @@ class EtherpadProcessor {
 
       if (showDetails) {
         console.log(`📝 ${existingRecord ? '更新' : '新增'}: ${padInfo.padId}:rev${padInfo.revision}`);
-        if (!existingRecord) {
-          console.log(`   行为: ${insertData.changeBehavior || '未知'}`);
-          console.log(`   内容: ${insertData.changeContent || '无'}`);
-          console.log(`   位置: ${insertData.changePosition || '无'}`);
-        }
       }
 
       return { 
@@ -100,14 +144,15 @@ class EtherpadProcessor {
     }
   }
 
-  // 定时任务：处理指定日期的数据
-  async processDayData(targetDate) {
+  // 增量处理 etherpad_pad_version 数据（前一天的数据）
+  async processIncrementalPadVersion(targetDate = null) {
     const taskId = generateTaskId();
-    console.log(`🚀 [${taskId}] 开始处理 ${targetDate.toLocaleDateString()} 的数据...`);
+    const processDate = targetDate || getYesterday();
+    console.log(`🚀 [${taskId}] 开始增量处理 etherpad_pad_version 数据 (${processDate.toLocaleDateString()})...`);
 
     try {
       // 计算时间范围
-      const timeRange = calculateTimeRange(targetDate);
+      const timeRange = calculateTimeRange(processDate);
       console.log(`📅 时间范围: ${formatTime(timeRange.startTime)} 到 ${formatTime(timeRange.endTime)}`);
 
       // 获取store数据
@@ -126,7 +171,7 @@ class EtherpadProcessor {
 
       // 处理数据
       for (const row of storeData) {
-        const result = await this.processRecord(row, processedCount < 5);
+        const result = await this.processRecord(row, false);
         
         if (result.success) {
           processedCount++;
@@ -140,7 +185,7 @@ class EtherpadProcessor {
         }
 
         // 显示进度
-        if (processedCount % 10 === 0 && processedCount > 0) {
+        if (processedCount % 500 === 0 && processedCount > 0) {
           console.log(`📈 已处理 ${processedCount}/${storeData.length} 条记录...`);
         }
       }
@@ -170,13 +215,13 @@ class EtherpadProcessor {
     }
   }
 
-  // 处理所有现有数据
-  async processAllData() {
+  // 全量处理 etherpad_pad_version 数据
+  async processFullPadVersion() {
     const taskId = generateTaskId();
-    console.log(`🚀 [${taskId}] 开始处理所有现有数据...`);
+    console.log(`🚀 [${taskId}] 开始全量处理 etherpad_pad_version 数据...`);
 
     try {
-      // 获取所有store数据
+      // 获取所有版本数据
       const storeData = await this.db.getAllStoreData();
       console.log(`📊 找到 ${storeData.length} 条store记录`);
 
@@ -186,7 +231,7 @@ class EtherpadProcessor {
       let errorCount = 0;
 
       for (const row of storeData) {
-        const result = await this.processRecord(row, processedCount < 5);
+        const result = await this.processRecord(row, false);
         
         if (result.success) {
           processedCount++;
@@ -200,7 +245,7 @@ class EtherpadProcessor {
         }
 
         // 显示进度
-        if (processedCount % 10 === 0 && processedCount > 0) {
+        if (processedCount % 500 === 0 && processedCount > 0) {
           console.log(`📈 已处理 ${processedCount}/${storeData.length} 条记录...`);
         }
       }
@@ -213,11 +258,6 @@ class EtherpadProcessor {
       const contentResult = await this.reconstructContentForProcessedData(storeData);
       console.log(`✅ [${taskId}] 内容重建完成: 处理${contentResult.totalPads}个pad, 更新${contentResult.updatedVersions}个版本`);
 
-      // 自动进行作者数据同步
-      console.log(`👥 [${taskId}] 开始同步作者数据...`);
-      const authorResult = await this.syncAuthorData();
-      console.log(`✅ [${taskId}] 作者数据同步完成: 处理${authorResult.total}个作者, 成功${authorResult.processed}个, 错误${authorResult.errors}个`);
-
       return {
         success: true,
         taskId,
@@ -226,9 +266,7 @@ class EtherpadProcessor {
         inserted: insertedCount,
         updated: updatedCount,
         errors: errorCount,
-        contentRebuilt: contentResult.updatedVersions,
-        authorsSynced: authorResult.processed,
-        authorErrors: authorResult.errors
+        contentRebuilt: contentResult.updatedVersions
       };
 
     } catch (error) {
@@ -239,36 +277,93 @@ class EtherpadProcessor {
 
 
 
-  // 运行定时任务
-  async runScheduledTask() {
+  // 运行增量处理任务（替代原来的定时任务）
+  async runIncrementalTask() {
     try {
       await this.connect();
-      
-      // 处理前一天的数据
-      const yesterday = getYesterday();
-      const result = await this.processDayData(yesterday);
-      
+      const result = await this.processIncrementalPadVersion();
       return result;
-
     } catch (error) {
-      console.error('定时任务执行失败:', error);
+      console.error('增量处理任务执行失败:', error);
       return { success: false, error: error.message };
     } finally {
       await this.disconnect();
     }
   }
 
+  // 运行pad基础信息处理任务
+  async runPadInfoProcessTask() {
+    const taskId = generateTaskId();
+    console.log(`🚀 开始处理Pad基础信息任务 ${taskId}`);
+    console.log(`⏰ 开始时间: ${formatTime(new Date())}`);
 
-
-  // 运行全量数据处理任务
-  async runFullProcessTask() {
     try {
       await this.connect();
-      const result = await this.processAllData();
-      return result;
+      
+      // 获取所有pad基础数据
+      console.log('📊 获取store中的pad基础数据...');
+      const storeData = await this.db.getAllPadData();
+      console.log(`📝 找到 ${storeData.length} 条pad基础记录`);
+
+      if (storeData.length === 0) {
+        console.log('✅ 没有需要处理的pad基础数据');
+        return { success: true, processed: 0, new: 0, updated: 0 };
+      }
+
+      let successCount = 0;
+      let failureCount = 0;
+      let newRecordCount = 0;
+      let updateRecordCount = 0;
+
+      console.log('🔄 开始处理pad基础信息...');
+      for (const row of storeData) {
+        const result = await this.processPadInfo(row, false);
+        
+        if (result.success) {
+          successCount++;
+          if (result.isNewRecord) {
+            newRecordCount++;
+          } else {
+            updateRecordCount++;
+          }
+        } else {
+          failureCount++;
+        }
+      }
+
+      console.log('\n📊 Pad基础信息处理完成统计:');
+      console.log(`   总记录数: ${storeData.length}`);
+      console.log(`   成功处理: ${successCount}`);
+      console.log(`   新增记录: ${newRecordCount}`);
+      console.log(`   更新记录: ${updateRecordCount}`);
+      console.log(`   处理失败: ${failureCount}`);
+      console.log(`⏰ 结束时间: ${formatTime(new Date())}`);
+
+      return {
+        success: true,
+        total: storeData.length,
+        processed: successCount,
+        new: newRecordCount,
+        updated: updateRecordCount,
+        failed: failureCount
+      };
 
     } catch (error) {
-      console.error('全量数据处理任务执行失败:', error);
+      console.error('❌ Pad基础信息处理任务失败:', error);
+      return { success: false, error: error.message };
+    } finally {
+      await this.disconnect();
+    }
+  }
+
+  // 运行全量版本处理任务
+  async runFullPadVersionTask() {
+    try {
+      await this.connect();
+      const result = await this.processFullPadVersion();
+      return result;
+    } catch (error) {
+      console.error('全量版本处理任务执行失败:', error);
       return { success: false, error: error.message };
     } finally {
       await this.disconnect();
@@ -327,7 +422,7 @@ class EtherpadProcessor {
               changeset: '',
               changeBehavior: 'add', // 初始状态视为添加
               changeContent: version0Info.content || '',
-                        changePosition: null
+              changePosition: null
             });
             console.log(`📝 准备插入版本0: "${version0Info.content || ''}" (${(version0Info.content || '').length}字符)`);
           }
@@ -406,7 +501,7 @@ class EtherpadProcessor {
 
           if (operationCount > 0) {
             totalUpdated += operationCount;
-            console.log(`✅ ${padId}: 更新${updates.length}个+插入${insertData.length}个 = 总计${operationCount}个版本`);
+            // 减少日志输出
           }
 
           totalReconstructed++;
@@ -477,23 +572,7 @@ class EtherpadProcessor {
           const exists = await this.db.checkRecordExists(padId, 0);
           
           if (exists) {
-            // 转换timestamp为datetime格式（北京时区 UTC+8）
-            const convertTimestamp = (timestamp) => {
-              if (!timestamp) return null;
-              try {
-                const date = new Date(parseInt(timestamp));
-                // 直接使用原始时间，让MySQL处理时区，然后手动转换为北京时区
-                const utcTime = date.toISOString().slice(0, 19).replace('T', ' ');
-                
-                // 手动计算北京时间（UTC+8）
-                const beijingDate = new Date(date.getTime() + (8 * 60 * 60 * 1000));
-                return beijingDate.toISOString().slice(0, 19).replace('T', ' ');
-              } catch (error) {
-                return null;
-              }
-            };
-
-            const createTime = convertTimestamp(storeValue.meta.timestamp);
+            const createTime = convertTimestampToBeijingTime(storeValue.meta.timestamp);
 
             // 更新现有记录
             await this.db.connection.execute(`
@@ -573,24 +652,8 @@ class EtherpadProcessor {
           const changesetRecord = padData.revisions.find(r => r.revision === revision);
           if (!changeset || !changesetRecord) continue;
           
-          try {
-            // 转换timestamp为datetime格式（北京时区 UTC+8）
-            const convertTimestamp = (timestamp) => {
-              if (!timestamp) return null;
-              try {
-                const date = new Date(parseInt(timestamp));
-                // 直接使用原始时间，让MySQL处理时区，然后手动转换为北京时区
-                const utcTime = date.toISOString().slice(0, 19).replace('T', ' ');
-                
-                // 手动计算北京时间（UTC+8）
-                const beijingDate = new Date(date.getTime() + (8 * 60 * 60 * 1000));
-                return beijingDate.toISOString().slice(0, 19).replace('T', ' ');
-              } catch (error) {
-                return null;
-              }
-            };
-
-            const createTime = convertTimestamp(changesetRecord.timestamp);
+                  try {
+          const createTime = convertTimestampToBeijingTime(changesetRecord.timestamp);
 
             // 检查记录是否存在
             const exists = await this.db.checkRecordExists(padId, revision);
@@ -646,14 +709,14 @@ class EtherpadProcessor {
                 if (changeBehavior !== null) {
                   updateFields.push('change_behavior = ?');
                   updateParams.push(changeBehavior);
-                }
+              }
                 if (changeContent !== null) {
                   updateFields.push('change_content = ?');
                   updateParams.push(changeContent);
                 }
                 if (changePosition !== null) {
-                  updateFields.push('change_position = ?');
-                  updateParams.push(changePosition);
+                updateFields.push('change_position = ?');
+                updateParams.push(changePosition);
                 }
               }
 
@@ -675,7 +738,7 @@ class EtherpadProcessor {
                 updatedVersions++;
                 operationCount++;
                 
-                if (operationCount % 100 === 0) {
+                if (operationCount % 1000 === 0) {
                   console.log(`📊 内容重建进度: ${operationCount} 个版本已更新`);
                 }
               } else {
@@ -896,39 +959,126 @@ class EtherpadProcessor {
     }
   }
 
-  // 运行内容重建任务
-  async runContentReconstructionTask() {
+  // 组合处理三张表：etherpad_pad_version(增量) + etherpad_author(全量) + etherpad_pad_info(全量)
+  async processAllTables() {
+    const taskId = generateTaskId();
+    console.log(`🚀 [${taskId}] 开始组合处理三张表：etherpad_pad_version(增量) + etherpad_author(全量) + etherpad_pad_info(全量)...`);
+    
     try {
       await this.connect();
-      const result = await this.reconstructAllContent();
-      return result;
-
+      
+      // 并行执行所有任务以提高效率
+      console.log(`🔄 [${taskId}] 并行执行三个处理任务...`);
+      
+      const [padVersionResult, authorResult, padInfoResult] = await Promise.all([
+        // 1. 增量处理 etherpad_pad_version（处理前一天数据）
+        this.processIncrementalPadVersionInternal(),
+        
+        // 2. 全量处理 etherpad_author（重新同步所有作者）
+        this.syncAuthorDataInternal(),
+        
+        // 3. 全量处理 etherpad_pad_info（重新提取所有pad信息）
+        this.processPadInfoBatchInternal()
+      ]);
+      
+      console.log(`✅ [${taskId}] 三张表组合处理完成!`);
+      console.log(`📊 汇总统计:`);
+      console.log(`   etherpad_pad_version(增量): 处理${padVersionResult.processed}条，重建${padVersionResult.contentRebuilt}个版本`);
+      console.log(`   etherpad_author(全量): 处理${authorResult.processed}个作者`);
+      console.log(`   etherpad_pad_info(全量): 处理${padInfoResult.processed}个pad`);
+      
+      return {
+        success: true,
+        taskId,
+        padVersion: padVersionResult,
+        author: authorResult,
+        padInfo: padInfoResult
+      };
+      
     } catch (error) {
-      console.error('内容重建任务执行失败:', error);
-      return { success: false, error: error.message };
+      console.error(`❌ [${taskId}] 三张表组合处理失败:`, error);
+      return { success: false, error: error.message, taskId };
     } finally {
       await this.disconnect();
     }
   }
 
-  // 同步作者数据到 etherpad_author 表
-  async syncAuthorData() {
-    const taskId = generateTaskId();
-    console.log(`👥 [${taskId}] 开始同步作者数据到 etherpad_author 表...`);
+  // 内部方法：增量处理 etherpad_pad_version（不含连接管理）
+  async processIncrementalPadVersionInternal(targetDate = null) {
+    const processDate = targetDate || getYesterday();
+    console.log(`📊 增量处理 etherpad_pad_version 数据 (${processDate.toLocaleDateString()})...`);
 
+    try {
+      // 计算时间范围
+      const timeRange = calculateTimeRange(processDate);
+      
+      // 获取store数据
+      const storeData = await this.db.getStoreData(timeRange.startTime, timeRange.endTime);
+      console.log(`📊 获取到 ${storeData.length} 条版本记录`);
+
+      if (storeData.length === 0) {
+        return { success: true, processed: 0, inserted: 0, updated: 0, errors: 0, contentRebuilt: 0 };
+      }
+
+      let processedCount = 0;
+      let insertedCount = 0;
+      let updatedCount = 0;
+      let errorCount = 0;
+
+      // 处理数据
+      for (const row of storeData) {
+        const result = await this.processRecord(row, false);
+        
+        if (result.success) {
+          processedCount++;
+          if (result.isUpdate) {
+            updatedCount++;
+          } else {
+            insertedCount++;
+          }
+        } else {
+          errorCount++;
+        }
+
+        // 显示进度
+        if (processedCount % 500 === 0 && processedCount > 0) {
+          console.log(`📈 版本处理进度: ${processedCount}/${storeData.length}`);
+        }
+      }
+
+      // 自动进行内容重建
+      console.log(`🔧 开始重建版本内容...`);
+      const contentResult = await this.reconstructContentForProcessedData(storeData);
+
+      return {
+        success: true,
+        total: storeData.length,
+        processed: processedCount,
+        inserted: insertedCount,
+        updated: updatedCount,
+        errors: errorCount,
+        contentRebuilt: contentResult.updatedVersions
+      };
+
+    } catch (error) {
+      console.error(`❌ 增量处理版本数据失败:`, error);
+      throw error;
+    }
+  }
+
+  // 核心方法：处理作者数据的核心逻辑（不含连接管理和任务ID）
+  async _syncAuthorDataCore() {
     try {
       // 获取所有 globalAuthor 数据
       const globalAuthorData = await this.db.getGlobalAuthorData();
-      console.log(`📊 找到 ${globalAuthorData.length} 个 globalAuthor 记录`);
+      console.log(`📊 找到 ${globalAuthorData.length} 个作者记录`);
 
       if (globalAuthorData.length === 0) {
-        console.log('✅ 没有需要同步的作者数据');
         return { success: true, processed: 0, inserted: 0, updated: 0, errors: 0 };
       }
 
       // 清空现有的 etherpad_author 表（全量更新）
       await this.db.clearAuthorTable();
-      console.log('🗑️ 已清空 etherpad_author 表，准备全量更新');
 
       let processedCount = 0;
       let insertedCount = 0;
@@ -942,32 +1092,22 @@ class EtherpadProcessor {
           if (result.success) {
             processedCount++;
             insertedCount++;
-            
-            if (processedCount <= 5) {
-              console.log(`👤 处理作者: ${result.authorData.author_name || '未命名'} (${result.authorData.author_id})`);
-            }
           } else {
             errorCount++;
-            console.error(`❌ 处理作者记录失败: ${authorRecord.key} - ${result.reason}`);
           }
 
           // 显示进度
-          if (processedCount % 50 === 0 && processedCount > 0) {
-            console.log(`📈 已处理 ${processedCount}/${globalAuthorData.length} 个作者记录...`);
+          if (processedCount % 200 === 0 && processedCount > 0) {
+            console.log(`📈 作者处理进度: ${processedCount}/${globalAuthorData.length}`);
           }
 
         } catch (error) {
           errorCount++;
-          console.error(`❌ 处理作者记录异常: ${authorRecord.key}`, error.message);
         }
       }
 
-      console.log(`✅ [${taskId}] 作者数据同步完成!`);
-      console.log(`📊 统计: 总计${globalAuthorData.length}, 成功${processedCount}, 新增${insertedCount}, 错误${errorCount}`);
-
       return {
         success: true,
-        taskId,
         total: globalAuthorData.length,
         processed: processedCount,
         inserted: insertedCount,
@@ -975,6 +1115,164 @@ class EtherpadProcessor {
         errors: errorCount
       };
 
+    } catch (error) {
+      console.error(`❌ 作者数据处理失败:`, error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // 内部方法：全量处理 etherpad_author（不含连接管理）
+  async syncAuthorDataInternal() {
+    console.log(`👥 全量处理 etherpad_author 数据...`);
+    return await this._syncAuthorDataCore();
+  }
+
+  // 内部方法：全量处理 etherpad_pad_info（不含连接管理）
+  async processPadInfoBatchInternal() {
+    console.log(`📝 全量处理 etherpad_pad_info 数据...`);
+
+    try {
+      // 获取所有pad基础数据
+      const storeData = await this.db.getAllPadData();
+      console.log(`📊 找到 ${storeData.length} 条pad基础记录`);
+
+      if (storeData.length === 0) {
+        return { success: true, processed: 0, new: 0, updated: 0 };
+      }
+
+      let successCount = 0;
+      let failureCount = 0;
+      let newRecordCount = 0;
+      let updateRecordCount = 0;
+
+      for (const row of storeData) {
+        const result = await this.processPadInfo(row, false);
+        
+        if (result.success) {
+          successCount++;
+          if (result.isNewRecord) {
+            newRecordCount++;
+          } else {
+            updateRecordCount++;
+          }
+        } else {
+          failureCount++;
+        }
+
+        // 显示进度
+        if (successCount % 100 === 0 && successCount > 0) {
+          console.log(`📈 Pad信息处理进度: ${successCount}/${storeData.length}`);
+        }
+      }
+
+      return {
+        success: true,
+        total: storeData.length,
+        processed: successCount,
+        new: newRecordCount,
+        updated: updateRecordCount,
+        failed: failureCount
+      };
+
+    } catch (error) {
+      console.error(`❌ 全量处理pad信息失败:`, error);
+      throw error;
+    }
+  }
+
+  // 批量处理 pad_info （为组合命令使用）
+  async processPadInfoBatch() {
+    const taskId = generateTaskId();
+    console.log(`📝 [${taskId}] 开始批量处理 etherpad_pad_info...`);
+
+    try {
+      // 获取所有pad基础数据
+      const storeData = await this.db.getAllPadData();
+      console.log(`📊 找到 ${storeData.length} 条pad基础记录`);
+
+      if (storeData.length === 0) {
+        return { success: true, processed: 0, new: 0, updated: 0 };
+      }
+
+      let successCount = 0;
+      let failureCount = 0;
+      let newRecordCount = 0;
+      let updateRecordCount = 0;
+
+      for (const row of storeData) {
+        const result = await this.processPadInfo(row, false);
+        
+        if (result.success) {
+          successCount++;
+          if (result.isNewRecord) {
+            newRecordCount++;
+          } else {
+            updateRecordCount++;
+          }
+        } else {
+          failureCount++;
+        }
+      }
+
+      console.log(`✅ [${taskId}] Pad基础信息处理完成: 成功${successCount}, 新增${newRecordCount}, 更新${updateRecordCount}, 失败${failureCount}`);
+
+      return {
+        success: true,
+        total: storeData.length,
+        processed: successCount,
+        new: newRecordCount,
+        updated: updateRecordCount,
+        failed: failureCount
+      };
+
+    } catch (error) {
+      console.error(`❌ [${taskId}] 批量处理失败:`, error);
+      throw error;
+    }
+  }
+
+  // 运行作者数据同步任务
+  async runAuthorSyncTask() {
+    const taskId = generateTaskId();
+    console.log(`👥 开始执行作者数据同步任务 ${taskId}`);
+    console.log(`⏰ 开始时间: ${formatTime(new Date())}`);
+
+    try {
+      await this.connect();
+      
+      // 执行作者数据同步
+      const result = await this.syncAuthorData();
+      
+      console.log(`⏰ 结束时间: ${formatTime(new Date())}`);
+      return result;
+
+    } catch (error) {
+      console.error('❌ 作者数据同步任务失败:', error);
+      return { success: false, error: error.message };
+    } finally {
+      await this.disconnect();
+    }
+  }
+
+  // 同步作者数据到 etherpad_author 表
+  async syncAuthorData() {
+    const taskId = generateTaskId();
+    console.log(`👥 [${taskId}] 开始同步作者数据到 etherpad_author 表...`);
+
+    try {
+      const result = await this._syncAuthorDataCore();
+      
+      if (result.success) {
+        console.log(`✅ [${taskId}] 作者数据同步完成!`);
+        console.log(`📊 统计: 总计${result.total}, 成功${result.processed}, 新增${result.inserted}, 错误${result.errors}`);
+        
+        // 添加 taskId 到结果中
+        return { ...result, taskId };
+      } else {
+        console.error(`❌ [${taskId}] 作者数据同步失败:`, result.error);
+        return { ...result, taskId };
+      }
+      
     } catch (error) {
       console.error(`❌ [${taskId}] 作者数据同步失败:`, error);
       return { success: false, error: error.message, taskId };
@@ -995,20 +1293,9 @@ class EtherpadProcessor {
       // 解析作者数据
       const authorData = JSON.parse(authorRecord.value);
       
-      // 转换时间戳为 datetime 格式（北京时区 UTC+8）
-      const convertTimestamp = (timestamp) => {
-        if (!timestamp) return null;
-        try {
-          const date = new Date(parseInt(timestamp));
-          // 手动计算北京时间（UTC+8）
-          const beijingDate = new Date(date.getTime() + (8 * 60 * 60 * 1000));
-          return beijingDate.toISOString().slice(0, 19).replace('T', ' ');
-        } catch (error) {
-          return null;
-        }
-      };
-
-      const createdTime = convertTimestamp(authorData.timestamp);
+      // timestamp: 存储原始 JSON 解析的 timestamp (bigint)
+      // created_time: 存储北京时区转换后的 datetime
+      const createdTimeValue = convertTimestampToBeijingTime(authorData.timestamp);
 
       // 处理 padIDs - 如果是字符串则转换为 JSON 对象
       let padIDsJson = null;
@@ -1031,8 +1318,8 @@ class EtherpadProcessor {
         author_id: authorId,
         author_name: authorData.name || null,
         color_id: authorData.colorId !== undefined ? String(authorData.colorId) : null,
-        timestamp: new Date(), // 当前时间作为修改时间
-        created_time: createdTime,
+        timestamp: authorData.timestamp, // 原始 JSON timestamp (bigint)
+        created_time: createdTimeValue, // 北京时区转换后的 datetime
         padIDs: padIDsJson ? JSON.stringify(padIDsJson) : null
       };
 
@@ -1057,34 +1344,78 @@ async function main() {
   const args = process.argv.slice(2);
   const processor = new EtherpadProcessor();
 
-  if (args.includes('--scheduled') || args.includes('--run')) {
-    // 运行定时任务
-    console.log(`🕐 [${new Date().toISOString()}] 开始执行定时数据处理任务`);
-    const result = await processor.runScheduledTask();
+  if (args.includes('--process-incremental-etherpad_pad_version')) {
+    // 增量处理 etherpad_pad_version
+    console.log(`📊 [${new Date().toISOString()}] 开始执行 etherpad_pad_version 增量处理任务`);
+    const result = await processor.runIncrementalTask();
     
     if (result.success) {
-      console.log(`✅ [${new Date().toISOString()}] 定时任务完成`);
+      console.log(`✅ [${new Date().toISOString()}] etherpad_pad_version 增量处理完成`);
+      console.log(`📊 处理统计: 总数${result.total}, 成功${result.processed}, 新增${result.inserted}, 更新${result.updated}, 错误${result.errors}`);
     } else {
-      console.log(`❌ [${new Date().toISOString()}] 定时任务失败: ${result.error}`);
+      console.log(`❌ [${new Date().toISOString()}] etherpad_pad_version 增量处理失败: ${result.error}`);
       process.exit(1);
     }
 
-  } else if (args.includes('--process-all')) {
-    // 处理所有现有数据
-    console.log(`🚀 [${new Date().toISOString()}] 开始执行全量数据处理任务`);
-    const result = await processor.runFullProcessTask();
+  } else if (args.includes('--process-full-etherpad_pad_version')) {
+    // 全量处理 etherpad_pad_version
+    console.log(`🚀 [${new Date().toISOString()}] 开始执行 etherpad_pad_version 全量处理任务`);
+    const result = await processor.runFullPadVersionTask();
     
     if (result.success) {
-      console.log(`✅ [${new Date().toISOString()}] 全量数据处理完成`);
+      console.log(`✅ [${new Date().toISOString()}] etherpad_pad_version 全量处理完成`);
+      console.log(`📊 处理统计: 总数${result.total}, 成功${result.processed}, 新增${result.inserted}, 更新${result.updated}, 错误${result.errors}`);
     } else {
-      console.log(`❌ [${new Date().toISOString()}] 全量数据处理失败: ${result.error}`);
+      console.log(`❌ [${new Date().toISOString()}] etherpad_pad_version 全量处理失败: ${result.error}`);
+      process.exit(1);
+    }
+
+  } else if (args.includes('--process-etherpad_author')) {
+    // 处理 etherpad_author
+    console.log(`👥 [${new Date().toISOString()}] 开始执行 etherpad_author 处理任务`);
+    const result = await processor.runAuthorSyncTask();
+    
+    if (result.success) {
+      console.log(`✅ [${new Date().toISOString()}] etherpad_author 处理完成`);
+      console.log(`📊 处理统计: 总数${result.total}, 成功${result.processed}, 错误${result.errors}`);
+    } else {
+      console.log(`❌ [${new Date().toISOString()}] etherpad_author 处理失败: ${result.error}`);
+      process.exit(1);
+    }
+
+  } else if (args.includes('--process-etherpad_pad_info')) {
+    // 处理 etherpad_pad_info
+    console.log(`📝 [${new Date().toISOString()}] 开始执行 etherpad_pad_info 处理任务`);
+    const result = await processor.runPadInfoProcessTask();
+    
+    if (result.success) {
+      console.log(`✅ [${new Date().toISOString()}] etherpad_pad_info 处理完成`);
+      console.log(`📊 处理统计: 总数${result.total}, 新增${result.new}, 更新${result.updated}, 失败${result.failed}`);
+    } else {
+      console.log(`❌ [${new Date().toISOString()}] etherpad_pad_info 处理失败: ${result.error}`);
+      process.exit(1);
+    }
+
+  } else if (args.includes('--process-all-tables')) {
+    // 组合处理三张表：etherpad_pad_version(增量) + etherpad_author(全量) + etherpad_pad_info(全量)
+    console.log(`🚀 [${new Date().toISOString()}] 开始执行三张表组合处理任务`);
+    const result = await processor.processAllTables();
+    
+    if (result.success) {
+      console.log(`✅ [${new Date().toISOString()}] 三张表组合处理完成`);
+      console.log(`📊 汇总统计:`);
+      console.log(`   etherpad_pad_version(增量): 处理${result.padVersion.processed}条，重建${result.padVersion.contentRebuilt}个版本`);
+      console.log(`   etherpad_author(全量): 处理${result.author.processed}个作者`);
+      console.log(`   etherpad_pad_info(全量): 处理${result.padInfo.processed}个pad`);
+    } else {
+      console.log(`❌ [${new Date().toISOString()}] 三张表组合处理失败: ${result.error}`);
       process.exit(1);
     }
 
   } else if (args.includes('--test')) {
-    // 测试运行（处理昨天的数据）
+    // 测试运行（增量处理昨天的数据）
     console.log(`🧪 [${new Date().toISOString()}] 开始执行测试任务`);
-    const result = await processor.runScheduledTask();
+    const result = await processor.runIncrementalTask();
     
     console.log('🔍 测试结果:', result);
 
@@ -1093,17 +1424,31 @@ async function main() {
     console.log('🚀 Etherpad数据处理器');
     console.log('═'.repeat(50));
     console.log('使用方法:');
-    console.log('  node etherpad-processor.js --run         # 运行定时任务');
-    console.log('  node etherpad-processor.js --scheduled   # 运行定时任务');
-    console.log('  node etherpad-processor.js --process-all # 处理所有现有数据');
-    console.log('  node etherpad-processor.js --test        # 测试运行');
+    console.log('  node etherpad-processor.js --process-incremental-etherpad_pad_version  # 增量处理 etherpad_pad_version');
+    console.log('  node etherpad-processor.js --process-full-etherpad_pad_version         # 全量处理 etherpad_pad_version');
+    console.log('  node etherpad-processor.js --process-etherpad_author                   # 全量处理 etherpad_author');
+    console.log('  node etherpad-processor.js --process-etherpad_pad_info                 # 全量处理 etherpad_pad_info');
+    console.log('  node etherpad-processor.js --process-all-tables                       # 全量处理三张表组合');
+    console.log('  node etherpad-processor.js --test                                     # 测试运行');
     console.log('');
     console.log('功能说明:');
-    console.log('  --run/--scheduled: 处理前一天整天(00:00-23:59)的数据，包含changeset分析和内容重建');
-    console.log('  --process-all: 处理store表中所有pad数据，包含changeset分析、内容重建和作者同步');
-    console.log('  --test: 测试模式，显示详细结果');
+    console.log('  --process-incremental-etherpad_pad_version: 增量处理前一天的版本数据，包含changeset分析和内容重建');
+    console.log('  --process-full-etherpad_pad_version: 全量处理所有版本数据，包含changeset分析和内容重建');
+    console.log('  --process-etherpad_author: 全量处理作者数据，清空并重新同步所有作者信息');
+    console.log('  --process-etherpad_pad_info: 全量处理pad基础信息，提取atext、pool等数据');
+    console.log('  --process-all-tables: 组合命令，并行执行：版本增量处理+作者全量处理+pad信息全量处理');
+    console.log('  --test: 测试模式，执行增量处理并显示详细结果');
     console.log('');
-    console.log('注意: --process-all 会自动执行数据处理、内容重建和作者数据同步');
+    console.log('数据表说明:');
+    console.log('  etherpad_pad_version: 存储pad的版本历史和变更记录');
+    console.log('  etherpad_author: 存储作者信息和颜色配置');
+    console.log('  etherpad_pad_info: 存储pad的基础信息和当前状态');
+    console.log('');
+    console.log('组合命令详情:');
+    console.log('  --process-all-tables 同时执行:');
+    console.log('    ├─ etherpad_pad_version: 增量处理（前一天数据）');
+    console.log('    ├─ etherpad_author: 全量处理（重新同步所有作者）');
+    console.log('    └─ etherpad_pad_info: 全量处理（重新提取所有pad信息）');
   }
 }
 

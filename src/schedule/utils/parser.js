@@ -298,13 +298,13 @@ function analyzeChangesetContent(changeset, baseDocument = '') {
             }
             
             if (implicitContent) {
-              changes.push({
-                type: changeType,
-                content: implicitContent,
-                position: `第${insertPos.line}行第${insertPos.wordIndex}个词`,
-                line: insertPos.line,
-                wordIndex: insertPos.wordIndex
-              });
+            changes.push({
+              type: changeType,
+              content: implicitContent,
+              position: `第${insertPos.line}行第${insertPos.wordIndex}个词`,
+              line: insertPos.line,
+              wordIndex: insertPos.wordIndex
+            });
             }
           }
           
@@ -602,6 +602,48 @@ class ContentReconstructor {
   }
 }
 
+/**
+ * 从key中提取pad基础信息
+ * @param {string} key - store key (格式: 'pad:room-xxx')
+ * @returns {object} 解析后的pad基础信息
+ */
+function extractPadBasicInfo(key) {
+  // 处理 'pad:room-xxx' 格式（不包括 revs 和 chat）
+  const padMatch = key.match(/^pad:(room-\d+)$/);
+  if (padMatch) {
+    return {
+      padId: padMatch[1]
+    };
+  }
+  
+  return null;
+}
+
+/**
+ * 解析pad的JSON数据
+ * @param {string} value - store value (JSON字符串)
+ * @returns {object} 解析后的pad数据
+ */
+function parsePadData(value) {
+  try {
+    const data = JSON.parse(value);
+    
+    return {
+      fullText: data.atext?.text || null,
+      attribs: data.atext?.attribs || null,
+      pool: data.pool || null,
+      nextNum: data.pool?.nextNum || null,
+      head: data.head || null,
+      chatHead: data.chatHead !== undefined ? data.chatHead : null,
+      publicStatus: data.publicStatus !== undefined ? data.publicStatus : null,
+      savedRevisions: data.savedRevisions || null
+    };
+  } catch (error) {
+    console.error('❌ 解析pad数据失败:', error);
+    return null;
+  }
+}
+
 module.exports = {
   parseNum,
   parseChangeset,
@@ -610,6 +652,8 @@ module.exports = {
   calculatePosition,
   countWordsInLine,
   extractPadInfo, // 导出pad信息提取函数
+  extractPadBasicInfo, // 导出pad基础信息提取函数
+  parsePadData, // 导出pad数据解析函数
   ContentReconstructor, // 导出合并后的内容重建器
   DocumentState // 导出文档状态类
 }; 

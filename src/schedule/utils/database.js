@@ -5,6 +5,7 @@
 const mysql = require('mysql2/promise');
 const fs = require('fs');
 const path = require('path');
+const { convertTimestampToBeijingTime } = require('./timeConverter.js');
 
 // 读取settings.json配置  
 function loadDatabaseConfig() {
@@ -122,7 +123,7 @@ class DatabaseManager {
       const config = this.reloadConfig();
       console.log(`📡 连接数据库: ${config.user}@${config.host}:${config.port}/${config.database}`);
       this.connection = await mysql.createConnection(config);
-      console.log('✅ 数据库连接成功 (配置来源: settings.json)');
+      // 数据库连接成功
     } catch (error) {
       console.error('❌ 数据库连接失败:', error);
       console.error('💡 请检查settings.json中的数据库配置');
@@ -133,7 +134,7 @@ class DatabaseManager {
   async disconnect() {
     if (this.connection) {
       await this.connection.end();
-      console.log('数据库连接已关闭');
+      // 数据库连接已关闭
     }
   }
 
@@ -177,26 +178,109 @@ class DatabaseManager {
     return rows;
   }
 
+  // 获取所有 pad 基础信息数据（不包括版本数据）
+  async getAllPadData() {
+    const query = `
+      SELECT \`key\`, \`value\` 
+      FROM store 
+      WHERE \`key\` LIKE 'pad:room-%' 
+        AND \`key\` NOT LIKE 'pad:room-%:revs:%'
+        AND \`key\` NOT LIKE 'pad:room-%:chat:%'
+      ORDER BY \`key\`
+    `;
+    
+    const [rows] = await this.connection.execute(query);
+    return rows;
+  }
+
+  // 插入或更新pad基础信息
+  async insertPadInfo(data) {
+    try {
+      const query = `
+        INSERT INTO etherpad_pad_info 
+        (pad_id, full_text, attribs, pool, next_num, head, chat_head, public_status, saved_revisions, create_time, update_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+        ON DUPLICATE KEY UPDATE
+          full_text = VALUES(full_text),
+          attribs = VALUES(attribs),
+          pool = VALUES(pool),
+          next_num = VALUES(next_num),
+          head = VALUES(head),
+          chat_head = VALUES(chat_head),
+          public_status = VALUES(public_status),
+          saved_revisions = VALUES(saved_revisions),
+          update_time = NOW()
+      `;
+      
+      await this.connection.execute(query, [
+        data.padId,
+        data.fullText || null,
+        data.attribs || null,
+        data.pool ? JSON.stringify(data.pool) : null,
+        data.nextNum || null,
+        data.head || null,
+        data.chatHead || null,
+        data.publicStatus !== undefined ? data.publicStatus : null,
+        data.savedRevisions ? JSON.stringify(data.savedRevisions) : null
+      ]);
+      
+      return { success: true };
+    } catch (error) {
+      console.error('❌ 插入pad基础信息失败:', error);
+      throw error;
+    }
+  }
+
+  // 检查pad基础信息是否存在
+  async checkPadInfoExists(padId) {
+    try {
+      const query = `SELECT COUNT(*) as count FROM etherpad_pad_info WHERE pad_id = ?`;
+      const [rows] = await this.connection.execute(query, [padId]);
+      return rows[0].count > 0;
+    } catch (error) {
+      console.error('❌ 检查pad基础信息失败:', error);
+      throw error;
+    }
+  }
+
+  // 获取pad基础信息记录
+  async getPadInfo(padId) {
+    try {
+      const query = `
+        SELECT pad_id, full_text, attribs, pool, next_num, head, chat_head, 
+               public_status, saved_revisions, create_time, update_time
+        FROM etherpad_pad_info 
+        WHERE pad_id = ? 
+        LIMIT 1
+      `;
+      const [rows] = await this.connection.execute(query, [padId]);
+      if (rows.length === 0) {
+        return null;
+      }
+      const row = rows[0];
+      return {
+        padId: row.pad_id,
+        fullText: row.full_text,
+        attribs: row.attribs,
+        pool: row.pool ? JSON.parse(row.pool) : null,
+        nextNum: row.next_num,
+        head: row.head,
+        chatHead: row.chat_head,
+        publicStatus: row.public_status,
+        savedRevisions: row.saved_revisions ? JSON.parse(row.saved_revisions) : null,
+        createTime: row.create_time,
+        updateTime: row.update_time
+      };
+    } catch (error) {
+      console.error('❌ 获取pad基础信息失败:', error);
+      throw error;
+    }
+  }
+
   // 插入或更新pad版本数据
   async insertPadVersion(data) {
     try {
-      // 转换timestamp为datetime格式（北京时区 UTC+8）
-      const convertTimestamp = (timestamp) => {
-        if (!timestamp) return null;
-        try {
-          const date = new Date(parseInt(timestamp));
-          // 直接使用原始时间，让MySQL处理时区，然后手动转换为北京时区
-          const utcTime = date.toISOString().slice(0, 19).replace('T', ' ');
-          
-          // 手动计算北京时间（UTC+8）
-          const beijingDate = new Date(date.getTime() + (8 * 60 * 60 * 1000));
-          return beijingDate.toISOString().slice(0, 19).replace('T', ' ');
-        } catch (error) {
-          return null;
-        }
-      };
-
-      const createTime = convertTimestamp(data.timestamp);
+      const createTime = convertTimestampToBeijingTime(data.timestamp);
 
       // 先尝试包含新字段结构的插入
       const queryWithNewFields = `
@@ -227,7 +311,7 @@ class DatabaseManager {
         createTime
       ]);
     } catch (error) {
-      throw error;
+        throw error;
     }
   }
 
@@ -431,7 +515,7 @@ class DatabaseManager {
       const version0Exists = await this.checkRecordExists(padId, 0);
       
       if (!version0Exists) {
-        console.log(`📝 为 ${padId} 创建版本0记录`);
+        // 创建版本0记录
         
         // 创建版本0记录
         const version0Data = {
@@ -447,7 +531,7 @@ class DatabaseManager {
         };
         
         await this.insertPadVersion(version0Data);
-        console.log(`✅ 已创建 ${padId} 的版本0记录`);
+        // 已创建版本0记录
         return true;
       }
       
@@ -506,7 +590,7 @@ class DatabaseManager {
     try {
       const query = 'DELETE FROM etherpad_author';
       await this.connection.execute(query);
-      console.log('🗑️ etherpad_author 表已清空');
+      // etherpad_author 表已清空
     } catch (error) {
       console.error('❌ 清空 etherpad_author 表失败:', error);
       throw error;

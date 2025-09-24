@@ -1,0 +1,31 @@
+{
+  "task_schedules": {
+    "author_data_sync": {
+      "cron": "0 4 * * *",
+      "command": "--process-etherpad_author",
+      "description": "作者信息全量更新",
+      "target_table": "etherpad_author",
+      "priority": 1,
+      "estimated_duration": "10-30分钟",
+      "log_file": "author-sync.log"
+    },
+    "pad_info_extraction": {
+      "cron": "30 4 * * *",
+      "command": "--process-etherpad_pad_info",
+      "description": "Pad基础信息提取",
+      "target_table": "etherpad_pad_info",
+      "priority": 2,
+      "estimated_duration": "10-20分钟",
+      "log_file": "pad-info.log"
+    },
+    "pad_version_incremental": {
+      "cron": "0 5 * * *",
+      "command": "--process-incremental-etherpad_pad_version",
+      "description": "Pad版本增量处理",
+      "target_table": "etherpad_pad_version",
+      "priority": 3,
+      "estimated_duration": "30-60分钟",
+      "log_file": "pad-version.log"
+    }
+  }
+} 

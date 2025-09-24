@@ -154,7 +154,6 @@ async function createPersistentMergedTable() {
         changeset longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL COMMENT '变更集JSON数组',
         create_time datetime NULL DEFAULT CURRENT_TIMESTAMP COMMENT '数据创建时间',
         original_count int NOT NULL DEFAULT 1 COMMENT '原始记录数量',
-        merge_time datetime NULL DEFAULT CURRENT_TIMESTAMP COMMENT '合并时间',
         PRIMARY KEY (id) USING BTREE,
         UNIQUE INDEX uk_pad_revision_author (pad_id ASC, revision ASC, author ASC) USING BTREE,
         INDEX idx_pad_id (pad_id) USING BTREE,
@@ -190,8 +189,8 @@ async function createPersistentMergedTable() {
         const insertQuery = `
           INSERT INTO etherpad_pad_version_merged 
           (pad_id, revision, content, change_behavior, change_content, change_position, 
-           author, timestamp, changeset, create_time, original_count, merge_time)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+           author, timestamp, changeset, create_time, original_count)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
         
         await merger.db.connection.execute(insertQuery, [
