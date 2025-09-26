@@ -398,7 +398,17 @@ exports.padeditbar = new class {
     });
 
     this.registerCommand('showTimeSlider', () => {
-      document.location = `${document.location.pathname}/timeslider`;
+      // 获取当前URL中的userName参数
+      const urlParams = new URLSearchParams(window.location.search);
+      const userName = urlParams.get('userName');
+      
+      // 构建timeslider URL，保留userName参数
+      let timesliderUrl = `${document.location.pathname}/timeslider`;
+      if (userName) {
+        timesliderUrl += `?userName=${encodeURIComponent(userName)}`;
+      }
+      
+      document.location = timesliderUrl;
     });
 
     const aceAttributeCommand = (cmd, ace) => {
@@ -469,14 +479,30 @@ exports.padeditbar = new class {
     });
 
     this.registerCommand('timeslider_returnToPad', (cmd) => {
+      // 获取当前URL中的userName参数
+      const urlParams = new URLSearchParams(window.location.search);
+      const userName = urlParams.get('userName');
+      
+      let returnUrl;
       if (document.referrer.length > 0 &&
           document.referrer.substring(document.referrer.lastIndexOf('/') - 1,
               document.referrer.lastIndexOf('/')) === 'p') {
-        document.location = document.referrer;
+        returnUrl = document.referrer;
       } else {
-        document.location = document.location.href
+        returnUrl = document.location.href
             .substring(0, document.location.href.lastIndexOf('/'));
       }
+      
+      // 确保返回URL包含userName参数
+      if (userName) {
+        const separator = returnUrl.includes('?') ? '&' : '?';
+        // 检查是否已经包含userName参数
+        if (!returnUrl.includes('userName=')) {
+          returnUrl += `${separator}userName=${encodeURIComponent(userName)}`;
+        }
+      }
+      
+      document.location = returnUrl;
     });
   }
 }();

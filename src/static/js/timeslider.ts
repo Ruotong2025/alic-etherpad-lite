@@ -64,7 +64,12 @@ const init = () => {
 
     // send the ready message once we're connected
     socket.on('connect', () => {
-      sendSocketMsg('CLIENT_READY', {
+      // 直接发送消息，不通过sendSocketMsg包装，确保结构正确
+      socket.emit('message', {
+        component: 'pad',
+        type: 'CLIENT_READY',
+        padId: padId,
+        sessionID: Cookies.get('sessionID'),
         userInfo: {
           name: userNameFromUrl.trim()
         }
