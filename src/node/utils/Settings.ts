@@ -241,7 +241,7 @@ exports.toolbar = {
         ['bold', 'italic', 'underline', 'strikethrough'],
         ['orderedlist', 'unorderedlist', 'indent', 'outdent'],
         ['undo', 'redo'],
-        ['clearauthorship'],
+        // ['clearauthorship'], // 已移除清除作者颜色功能
     ],
     right: [
         ['importexport', 'timeslider', 'savedrevision'],

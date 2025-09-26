@@ -589,19 +589,19 @@ function Ace2Inner(editorInfo, cssManagers) {
   };
 
   const CMDS = {
-    clearauthorship: (prompt) => {
-      if ((!(rep.selStart && rep.selEnd)) || isCaret()) {
-        if (prompt) {
-          prompt();
-        } else {
-          performDocumentApplyAttributesToCharRange(0, rep.alltext.length, [
-            ['author', ''],
-          ]);
-        }
-      } else {
-        setAttributeOnSelection('author', '');
-      }
-    },
+    // clearauthorship: (prompt) => {
+    //   if ((!(rep.selStart && rep.selEnd)) || isCaret()) {
+    //     if (prompt) {
+    //       prompt();
+    //     } else {
+    //       performDocumentApplyAttributesToCharRange(0, rep.alltext.length, [
+    //         ['author', ''],
+    //       ]);
+    //     }
+    //   } else {
+    //     setAttributeOnSelection('author', '');
+    //   }
+    // },
   };
 
   const execCommand = (cmd, ...args) => {
@@ -2796,8 +2796,8 @@ function Ace2Inner(editorInfo, cssManagers) {
           specialHandled = true;
         }
         if (!specialHandled && isTypeForCmdKey &&
-            // cmd-shift-C (clearauthorship)
-            (evt.metaKey || evt.ctrlKey) && evt.shiftKey &&
+            // cmd-shift-C (clearauthorship) - 已禁用
+            false && (evt.metaKey || evt.ctrlKey) && evt.shiftKey &&
             String.fromCharCode(which).toLowerCase() === 'c' &&
             padShortcutEnabled.cmdShiftC) {
           fastIncorp(9);
