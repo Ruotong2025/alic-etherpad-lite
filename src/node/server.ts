@@ -80,6 +80,7 @@ const pluginDefs = require('../static/js/pluginfw/plugin_defs');
 const plugins = require('../static/js/pluginfw/plugins');
 import {Gate} from './utils/promises';
 const stats = require('./stats')
+import {taskScheduler} from './scheduler';
 
 const logger = log4js.getLogger('server');
 
@@ -192,6 +193,16 @@ exports.start = async () => {
 
   logger.info('Etherpad is running');
   state = State.RUNNING;
+
+  // 启动定时任务调度器
+  try {
+    await taskScheduler.initialize();
+    logger.info('✅ 定时任务调度器已启动');
+  } catch (err) {
+    logger.error('❌ 定时任务调度器启动失败:', err);
+    // 不中断主服务器启动，继续运行
+  }
+
   // @ts-ignore
   startDoneGate.resolve();
 
@@ -222,6 +233,15 @@ exports.stop = async () => {
   }
   logger.info('Stopping Etherpad...');
   state = State.STOPPING;
+  
+  // 停止定时任务调度器
+  try {
+    await taskScheduler.destroy();
+    logger.info('✅ 定时任务调度器已停止');
+  } catch (err) {
+    logger.error('❌ 定时任务调度器停止失败:', err);
+  }
+
   try {
     let timeout: NodeJS.Timeout = null as unknown as NodeJS.Timeout;
     await Promise.race([

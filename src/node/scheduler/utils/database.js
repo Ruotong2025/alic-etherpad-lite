@@ -11,7 +11,7 @@ const { convertTimestampToBeijingTime } = require('./timeConverter.js');
 function loadDatabaseConfig() {
   try {
     // 动态读取settings.json文件
-    const settingsPath = path.join(__dirname, '../../../settings.json');
+    const settingsPath = path.join(__dirname, '../../../../settings.json');
     
     if (!fs.existsSync(settingsPath)) {
       throw new Error('settings.json文件不存在');

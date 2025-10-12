@@ -1,4 +1,6 @@
 {
+  "enabled": true,
+  "timezone": "Asia/Shanghai",
   "task_schedules": {
     "author_data_sync": {
       "cron": "0 4 * * *",

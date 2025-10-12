@@ -22,6 +22,39 @@ We're looking for maintainers and have some funding available.  Please contact J
 
 [![Code Quality](https://github.com/ether/etherpad-lite/actions/workflows/codeql-analysis.yml/badge.svg?color=%2344b492)](https://github.com/ether/etherpad-lite/actions/workflows/codeql-analysis.yml)
 
+### Start
+使用pnpm install安装依赖
+
+使用pnpm run build:etherpad构建项目
+
+使用pnpm run dev启动开发服务器
+
+### 2. MySQL 数据库配置
+
+```json
+{
+  "dbType": "mysql",
+  "dbSettings": {
+    "user":     "root",
+    "host":     "112.74.92.135",
+    "port":     3306,
+    "password": "1q2w3e4R",
+    "database": "alic",
+    "charset":  "utf8mb4"
+  }
+}
+```
+
+### Clean
+清楚所有
+tasklist | findstr node
+taskkill /f /im node.exe
+只清除etherpad
+Get-Process -Name node | Select-Object Id,ProcessName,@{Name='CommandLine';Expression={(Get-WmiObject Win32_Process -Filter "ProcessId=$($_.Id)").CommandLine}}
+![img.png](img.png)
+taskkill /f /pid 18328
+
+
 ### Testing
 
 [![Backend tests](https://github.com/ether/etherpad-lite/actions/workflows/backend-tests.yml/badge.svg?color=%2344b492)](https://github.com/ether/etherpad-lite/actions/workflows/backend-tests.yml)
