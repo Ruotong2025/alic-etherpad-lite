@@ -35,7 +35,6 @@ async function createMergeTable(connection) {
       content LONGTEXT NOT NULL,
       author_id VARCHAR(255) DEFAULT '',
       timestamp BIGINT NOT NULL,
-      changeset TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (pad_id, revision)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -170,8 +169,8 @@ async function insertMergedData(connection, mergedVersions) {
 
   const insertSQL = `
     INSERT INTO pad_version_contents_merge 
-    (pad_id, revision, content, author_id, timestamp, changeset) 
-    VALUES (?, ?, ?, ?, ?, ?)
+    (pad_id, revision, content, author_id, timestamp) 
+    VALUES (?, ?, ?, ?, ?)
   `;
 
   for (const version of mergedVersions) {
@@ -180,8 +179,7 @@ async function insertMergedData(connection, mergedVersions) {
       version.revision,
       version.content || '',
       version.author_id || '',
-      version.timestamp || 0,
-      version.changeset || ''
+      version.timestamp || 0
     ]);
   }
 

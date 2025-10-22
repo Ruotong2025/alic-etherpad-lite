@@ -81,7 +81,6 @@ const padId = process.argv[2];
           content LONGTEXT NOT NULL,
           author_id VARCHAR(255) DEFAULT '',
           timestamp BIGINT NOT NULL,
-          changeset TEXT,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           UNIQUE KEY unique_pad_revision (pad_id, revision)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -109,6 +108,10 @@ const padId = process.argv[2];
         await mysqlConnection.execute(`ALTER TABLE pad_version_contents DROP COLUMN attribs`);
         console.log('✓ 删除了 attribs 列');
       }
+      if (existingColumns.includes('changeset')) {
+        await mysqlConnection.execute(`ALTER TABLE pad_version_contents DROP COLUMN changeset`);
+        console.log('✓ 删除了 changeset 列');
+      }
       
       // 添加需要的列
       if (!existingColumns.includes('author_id')) {
@@ -119,10 +122,7 @@ const padId = process.argv[2];
         await mysqlConnection.execute(`ALTER TABLE pad_version_contents ADD COLUMN timestamp BIGINT NOT NULL DEFAULT 0`);
         console.log('✓ 添加了 timestamp 列');
       }
-      if (!existingColumns.includes('changeset')) {
-        await mysqlConnection.execute(`ALTER TABLE pad_version_contents ADD COLUMN changeset TEXT`);
-        console.log('✓ 添加了 changeset 列');
-      }
+      // changeset 列已被移除，不再需要添加
       
       console.log('✓ pad_version_contents 表结构调整完成');
     }
@@ -239,20 +239,18 @@ const padId = process.argv[2];
           try {
             await mysqlConnection.execute(`
               INSERT INTO pad_version_contents 
-              (pad_id, revision, content, author_id, timestamp, changeset)
-              VALUES (?, ?, ?, ?, ?, ?)
+              (pad_id, revision, content, author_id, timestamp)
+              VALUES (?, ?, ?, ?, ?)
               ON DUPLICATE KEY UPDATE
               content = VALUES(content),
               author_id = VALUES(author_id),
-              timestamp = VALUES(timestamp),
-              changeset = VALUES(changeset)
+              timestamp = VALUES(timestamp)
             `, [
               record.pad_id,
               record.revision,
               record.content,
               record.author,  // 使用 author 作为 author_id
-              record.timestamp,
-              record.changeset
+              record.timestamp
             ]);
 
             if (isUpdate) {
