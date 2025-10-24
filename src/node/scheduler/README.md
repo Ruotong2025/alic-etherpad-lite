@@ -32,7 +32,8 @@ CREATE TABLE `pad_version_snapshots` (
 ### 表2: pad_version_changes (变更记录)
 
 存储所有版本的变更记录，每个变更一条记录。
-
+分析pad_version_contents_merge对于里面的数据的变化
+pad_version_changes
 ```sql
 CREATE TABLE `pad_version_changes` (
   `pad_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT 'Pad ID',
@@ -48,6 +49,85 @@ CREATE TABLE `pad_version_changes` (
   INDEX `idx_author`(`author`)
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = 'Pad版本变更记录表';
 ```
+示例：
+版本1：
+“
+Welcome to Etherpad!
+
+This pad text is synchronized as you type, so that everyone viewing this page sees the same text. This allows you to collaborate seamlessly on documents!
+
+Get involved with Etherpad at https://etherpad.org
+”
+版本2：
+“
+Welcome to Etherpad!
+”
+变化就为：
+delete
+“
+This pad text is synchronized as you type, so that everyone viewing this page sees the same text. This allows you to collaborate seamlessly on documents!
+
+Get involved with Etherpad at https://etherpad.org
+”
+
+示例2：
+版本115：
+“
+欢迎来到Welcome to Etherpad!
+
+周末去哪里玩
+可以去迪士尼乐园
+整理一下行程安排
+比如 可以去哪里 为什么不能这样
+Tom你想去那里玩 为什么呢~~~~~
+我觉得可以去维多利亚港湾哦
+还可以麦理浩径呢
+嘻嘻
+怎么回事；
+怎么回事，~~~~~
+今天天气真好；
+测试一下cron~~~~~~~~~~
+测试一下功能
+明天看一下是否是对的~~~~~~
+
+整理一下
+我们一起讨论一下
+接下来的行程怎么安排
+”
+版本127：
+“
+欢迎来到Welcome to Etherpad!
+
+周末去哪里玩
+可以去迪士尼乐园或者海洋公园
+整理一下行程安排最好是Tom来安排
+比如 可以去哪里 为什么不能这样
+Tom你想去那里玩 为什么呢~~~~~
+我觉得可以去维多利亚港湾哦或者是中环旅游
+还可以麦理浩径呢是否能去其他地方
+
+嘻嘻
+怎么回事；
+怎么回事，~~~~~
+今天天气真好；
+测试一下cron~~~~~~~~~~
+测试一下功能
+明天看一下是否是对的~~~~~~
+
+整理一下整理一下
+我们一起讨论一下
+接下来的行程怎么安排
+我们一起讨论一下
+接下来的行程怎么安排
+”
+则changes为
+add 或者海洋公园
+add 最好是Tom来安排
+add 或者是中环旅游
+add 是否能去其他地方
+add 整理一下
+我们一起讨论一下
+接下来的行程怎么安排
 
 ## 🔄 核心处理逻辑
 
