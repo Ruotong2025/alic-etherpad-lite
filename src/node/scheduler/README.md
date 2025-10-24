@@ -1,292 +1,210 @@
-# Etherpad 定时任务调度器
+# Pad 版本变更数据生成方案
 
-## 概述
+## 📋 方案概述
 
-Etherpad现在支持内置的Node.js定时任务调度器，无需依赖系统cron。定时任务会在Etherpad主服务启动时自动运行。
+本方案用于从 `pad_version_contents_merge` 表生成详细的版本变更数据，包括完整快照和精确的变更记录，支持任意版本的完整恢复。
 
-## 架构
-
-```
-Etherpad Server (src/node/server.ts)
-    ↓
-TaskScheduler (src/node/scheduler/TaskScheduler.ts)
-    ↓
-├─ Task 1: 作者信息同步 (04:00)
-├─ Task 2: Pad信息提取 (04:30)
-└─ Task 3: Pad版本处理 (05:00)
-```
-
-## 配置文件
-
-### 位置：`src/node/scheduler/cron-config.json`
-
-```json
-{
-  "enabled": true,           // 是否启用定时任务
-  "timezone": "Asia/Shanghai", // 时区设置
-  "task_schedules": {
-    "author_data_sync": {
-      "enabled": true,       // 是否启用此任务
-      "cron": "0 4 * * *",   // Cron表达式
-      "command": "--process-etherpad_author",
-      "description": "作者信息全量更新",
-      "target_table": "etherpad_author",
-      "priority": 1,
-      "estimated_duration": "10-30分钟",
-      "log_file": "author-sync.log"
-    }
-  }
-}
-```
-
-### Cron表达式格式
+## 🏗️ 数据流程架构
 
 ```
- ┌────────────── 秒 (可选)
- │ ┌──────────── 分 (0-59)
- │ │ ┌────────── 时 (0-23)
- │ │ │ ┌──────── 日 (1-31)
- │ │ │ │ ┌────── 月 (1-12)
- │ │ │ │ │ ┌──── 周 (0-7, 0和7都表示周日)
- │ │ │ │ │ │
- * * * * * *
+pad_version_contents_merge (已合并的版本数据)
+    ↓ 逐版本对比处理
+pad_version_snapshots (单一最新快照) + pad_version_changes (所有变更记录)
+    ↓ 基于快照恢复
+输出: 任意版本的完整内容
 ```
 
-示例：
-- `0 4 * * *` - 每天凌晨4点
-- `*/15 * * * *` - 每15分钟
-- `0 */6 * * *` - 每6小时
-- `0 9-17 * * 1-5` - 工作日9-17点每小时
+## 🗄️ 数据库表结构
 
-## 使用方法
+### 表1: pad_version_snapshots (最新完整快照)
 
-### 1. 自动启动（推荐）
+存储每个pad的最新完整快照，包含所有删除标记。
 
-定时任务会在Etherpad启动时自动运行：
+```sql
+CREATE TABLE `pad_version_snapshots` (
+  `pad_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL PRIMARY KEY COMMENT 'Pad ID',
+  `latest_revision` int NOT NULL COMMENT '最新处理到的版本号',
+  `full_content_with_deleted` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci COMMENT '包含删除标记的完整内容',
+  `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = 'Pad版本完整快照表';
+```
+
+### 表2: pad_version_changes (变更记录)
+
+存储所有版本的变更记录，每个变更一条记录。
+
+```sql
+CREATE TABLE `pad_version_changes` (
+  `pad_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT 'Pad ID',
+  `revision` int NOT NULL COMMENT '版本号',
+  `change_type` varchar(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '变更类型 add/delete',
+  `change_content` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci COMMENT '变更的具体内容',
+  `change_position` int COMMENT '在完整快照中的字符位置',
+  `author` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci COMMENT '作者ID',
+  `timestamp` bigint COMMENT '操作时间戳',
+  `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  INDEX `idx_pad_revision`(`pad_id`, `revision`),
+  INDEX `idx_change_type`(`change_type`),
+  INDEX `idx_author`(`author`)
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = 'Pad版本变更记录表';
+```
+
+## 🔄 核心处理逻辑
+
+### 1. 逐版本构建快照
+
+每处理一个版本变更，立即更新快照：
+
+```
+初始快照: ""
+V1 → V2: 添加内容A → 快照: "A"
+V2 → V3: 删除内容A，添加内容B → 快照: "[deleted:A]B"
+V3 → V4: 添加内容C → 快照: "[deleted:A]BC"
+V4 → V5: 删除内容B → 快照: "[deleted:A][deleted:B]C"
+```
+
+### 2. 增量更新策略
+
+- **实时更新**: 每处理一个版本变更，立即更新快照
+- **完整信息**: 快照始终包含当前版本的实际内容 + 所有历史删除内容的标记
+- **统一基准**: 所有位置计算都基于包含删除标记的完整快照
+
+### 3. 变更记录存储
+
+- **精确位置**: 每个变更都记录其在最终快照中的精确位置
+- **完整信息**: 包含变更类型、内容、作者、时间戳等完整信息
+- **支持查询**: 支持按版本、作者、类型等多维度查询
+
+## 🛠️ 使用方法
+
+### 生成变更数据
 
 ```bash
-# 启动Etherpad
-pnpm run dev
-# 或
-pnpm run prod
+# 处理单个pad
+node src/node/scheduler/generatePadChanges.js <padId>
+
+# 示例
+node src/node/scheduler/generatePadChanges.js room-229
 ```
 
-### 2. 禁用定时任务
+## 📊 处理流程示例
 
-在 `cron-config.json` 中设置：
-
-```json
-{
-  "enabled": false
-}
+### 输入数据 (pad_version_contents_merge)
+```
+V1: "ABC"
+V2: "AXBC"
+V3: "AXC"
+V4: "AXYC"
 ```
 
-或禁用特定任务：
+### 处理过程
+```
+处理 V1→V2:
+- 差异: 添加 "X" at position 1
+- 快照更新: "ABC" → "AXBC"
+- 记录变更: {revision:2, type:'add', content:'X', position:1}
 
-```json
-{
-  "task_schedules": {
-    "author_data_sync": {
-      "enabled": false
-    }
-  }
-}
+处理 V2→V3:
+- 差异: 删除 "B" at position 2
+- 快照更新: "AXBC" → "AX[deleted:B]C"
+- 记录变更: {revision:3, type:'delete', content:'B', position:2}
+
+处理 V3→V4:
+- 差异: 添加 "Y" at position 2
+- 快照更新: "AX[deleted:B]C" → "AX[deleted:B]YC"
+- 记录变更: {revision:4, type:'add', content:'Y', position:13}
 ```
 
-### 3. 手动执行任务
+### 最终结果
+```
+pad_version_snapshots:
+- pad_id: "test"
+- latest_revision: 4
+- full_content_with_deleted: "AX[deleted:B]YC"
 
-通过HTTP API或直接调用：
-
-```typescript
-import { taskScheduler } from './node/scheduler';
-
-// 手动执行指定任务
-await taskScheduler.runTask('author_data_sync');
-
-// 获取状态
-const status = taskScheduler.getStatus();
-console.log(status);
+pad_version_changes:
+- {revision:2, type:'add', content:'X', position:1}
+- {revision:3, type:'delete', content:'B', position:2}
+- {revision:4, type:'add', content:'Y', position:13}
 ```
 
-## 日志查看
+## 🔍 查询示例
 
-定时任务日志保存在 `logs/` 目录：
-
-```bash
-# 查看作者同步日志
-tail -f logs/author-sync.log
-
-# 查看Pad信息日志
-tail -f logs/pad-info.log
-
-# 查看Pad版本日志
-tail -f logs/pad-version.log
+### 重建完整快照
+```sql
+SELECT full_content_with_deleted
+FROM pad_version_snapshots
+WHERE pad_id = 'room-229';
 ```
 
-## 监控
-
-### 查看调度器状态
-
-```typescript
-const status = taskScheduler.getStatus();
-// {
-//   isRunning: true,
-//   tasks: [
-//     { name: 'author_data_sync', nextRun: 'N/A' },
-//     { name: 'pad_info_extraction', nextRun: 'N/A' },
-//     { name: 'pad_version_incremental', nextRun: 'N/A' }
-//   ]
-// }
+### 查看特定版本的变更
+```sql
+SELECT * FROM pad_version_changes
+WHERE pad_id = 'room-229' AND revision = 5
+ORDER BY change_position;
 ```
 
-### 日志级别
-
-在Etherpad主日志中查看调度器信息：
-
-```bash
-tail -f logs/etherpad.log | grep scheduler
+### 按作者统计变更
+```sql
+SELECT
+  author,
+  change_type,
+  COUNT(*) as count
+FROM pad_version_changes
+WHERE pad_id = 'room-229'
+GROUP BY author, change_type;
 ```
 
-## 与旧版cron脚本的对比
-
-| 特性 | 旧版 (cron-setup.sh) | 新版 (TaskScheduler) |
-|------|---------------------|---------------------|
-| 依赖 | 系统cron + jq | 仅Node.js |
-| 启动 | 手动运行脚本 | 自动随服务启动 |
-| 日志 | 分散的文件 | 集中管理 |
-| 监控 | crontab -l | 程序化API |
-| 跨平台 | Linux/Mac only | 全平台支持 |
-| 热重载 | 需要重新设置 | 支持配置更新 |
-
-## 故障排查
-
-### 问题1：定时任务没有执行
-
-检查：
-1. 配置文件中 `enabled` 是否为 `true`
-2. Cron表达式是否正确
-3. 查看日志文件是否有错误信息
-
-### 问题2：任务执行失败
-
-查看具体任务的日志文件：
-
-```bash
-tail -f logs/<task-log-file>.log
+### 查看变更时间线
+```sql
+SELECT
+  revision,
+  change_type,
+  change_content,
+  author,
+  FROM_UNIXTIME(timestamp/1000) as change_time
+FROM pad_version_changes
+WHERE pad_id = 'room-229'
+ORDER BY revision, change_position;
 ```
 
-### 问题3：无法启动调度器
+## ✨ 方案优势
 
-检查：
-1. `node-cron` 依赖是否已安装：`pnpm list node-cron`
-2. 配置文件 JSON 格式是否正确
-3. 检查 Etherpad 主日志
+1. **位置统一**: 所有位置都基于同一个完整快照，确保一致性
+2. **删除可定位**: 删除内容通过标记保持位置信息，支持精确恢复
+3. **增量更新**: 每个版本增量更新，处理效率高
+4. **完整恢复**: 可以恢复任意历史版本的完整内容
+5. **查询灵活**: 支持多维度查询和统计分析
+6. **数据完整**: 保留所有变更的完整上下文信息
 
-## 开发指南
+## 🔧 技术实现
 
-### 添加新任务
+### 关键算法
 
-1. 在 `cron-config.json` 中添加任务配置
-2. 在 `etherpad-processor.js` 中添加对应的处理逻辑
-3. 重启 Etherpad
+1. **版本差异计算**: 使用改进的LCS算法计算版本间差异
+2. **快照增量更新**: 实时维护包含删除标记的完整快照
+3. **位置精确计算**: 基于统一快照计算变更的精确位置
+4. **版本恢复算法**: 根据变更历史恢复任意版本内容
 
-示例：
+### 性能优化
 
-```json
-{
-  "task_schedules": {
-    "my_custom_task": {
-      "enabled": true,
-      "cron": "0 3 * * *",
-      "command": "--process-my-table",
-      "description": "我的自定义任务",
-      "target_table": "my_table",
-      "priority": 4,
-      "estimated_duration": "5分钟",
-      "log_file": "my-task.log"
-    }
-  }
-}
-```
+1. **增量处理**: 只处理变更的部分，避免全量重建
+2. **索引优化**: 合理设计数据库索引，提高查询效率
+3. **内存管理**: 大文本处理时的内存优化
+4. **批量操作**: 批量插入变更记录，提高写入效率
 
-### 扩展调度器
+## 📝 注意事项
 
-编辑 `src/node/scheduler/TaskScheduler.ts`：
+1. **删除标记格式**: 使用 `[deleted:content]` 格式标记删除内容
+2. **位置计算基准**: 所有位置都基于包含删除标记的完整快照
+3. **版本顺序**: 必须按版本顺序处理，确保快照正确更新
+4. **内容过滤**: 自动过滤只有空白字符变更的记录
+5. **数据一致性**: 处理过程中确保快照和变更记录的一致性
 
-```typescript
-// 添加自定义方法
-public async runTaskImmediately(taskName: string): Promise<void> {
-  // 实现逻辑
-}
+## 🚀 扩展功能
 
-// 添加事件监听
-private onTaskComplete(taskName: string, duration: number): void {
-  // 实现逻辑
-}
-```
-
-## 迁移指南
-
-### 从旧版cron迁移
-
-1. **停止旧版cron任务**：
-   ```bash
-   crontab -l | grep -v "etherpad-processor.js" | crontab -
-   ```
-
-2. **更新配置**：
-   确保 `cron-config.json` 中的任务配置正确
-
-3. **安装依赖**：
-   ```bash
-   pnpm install
-   ```
-
-4. **启动Etherpad**：
-   ```bash
-   pnpm run prod
-   ```
-
-5. **验证**：
-   检查日志确认定时任务正常运行
-
-## 性能优化
-
-### 调整任务时间
-
-根据服务器负载调整任务执行时间，避免高峰期：
-
-```json
-{
-  "task_schedules": {
-    "heavy_task": {
-      "cron": "0 2 * * *"  // 凌晨2点，流量低谷
-    }
-  }
-}
-```
-
-### 控制并发
-
-任务按优先级顺序执行，避免同时运行过多任务。
-
-## 安全注意事项
-
-1. **日志文件权限**：确保日志目录有适当的访问权限
-2. **配置文件保护**：不要在配置文件中存储敏感信息
-3. **资源限制**：监控任务执行时的资源使用
-
-## 支持与反馈
-
-如有问题或建议，请：
-1. 查看日志文件
-2. 检查配置文件
-3. 提交Issue到项目仓库
-
-## 更新日志
-
-- **v2.3.2**: 首次集成Node.js定时调度器
-  - 支持多个定时任务
-  - 自动随服务启动
-  - 完整的日志记录
-  - 跨平台支持
+1. **批量处理**: 支持批量处理多个pad
+2. **增量同步**: 支持增量同步新版本
+3. **数据导出**: 支持导出变更数据为各种格式
+4. **可视化分析**: 提供变更数据的可视化分析工具
+5. **API接口**: 提供RESTful API接口供外部调用
