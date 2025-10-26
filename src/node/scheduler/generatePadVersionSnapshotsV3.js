@@ -1,19 +1,20 @@
 #!/usr/bin/env node
 
 /**
- * Pad 版本快照生成器 V3 - 最终版
+ * Pad 版本快照生成器 V3 - 修复版
  * 
- * 核心思路：
- * 1. 不维护快照，只维护"文档片段列表"
- * 2. 每个片段有类型（normal/deleted）和内容
- * 3. 应用变更时，直接操作片段列表
- * 4. 最后渲染成快照文本
+ * 核心改进：
+ * 1. 使用 google-diff-match-patch 库进行精确的文本差异计算
+ * 2. 增加快照验证机制，确保删除标记后与当前版本一致
+ * 3. 添加详细的调试日志
+ * 4. 改进文档片段管理逻辑
  * 
- * 使用方法: node generatePadVersionSnapshotsV3.js <padId>
+ * 使用方法: node generatePadVersionSnapshotsV3.js <padId> [--debug]
  */
 
 const mysql = require('mysql2/promise');
 const path = require('path');
+const DiffMatchPatch = require('diff-match-patch');
 
 // 数据库配置
 const DB_CONFIG = {
@@ -25,139 +26,87 @@ const DB_CONFIG = {
   port: process.env.DB_PORT || 3306
 };
 
+// 调试模式
+let DEBUG_MODE = false;
+
 /**
- * 文本差异计算器
+ * 调试日志
  */
-class TextDiffCalculator {
-  calculateDiff(oldText, newText) {
-    if (!oldText && !newText) return [];
-    if (!oldText) return [{ type: 'add', content: newText, position: 0 }];
-    if (!newText) return [{ type: 'delete', content: oldText, position: 0 }];
-
-    const operations = [];
-    const lcs = this._findLCS(oldText, newText);
-    
-    let oldPos = 0;
-    let newPos = 0;
-    let lcsPos = 0;
-    
-    while (oldPos < oldText.length || newPos < newText.length) {
-      if (lcsPos < lcs.length) {
-        const lcsChar = lcs[lcsPos];
-        const oldLcsPos = oldText.indexOf(lcsChar, oldPos);
-        const newLcsPos = newText.indexOf(lcsChar, newPos);
-        
-        if (oldPos < oldLcsPos) {
-          operations.push({
-            type: 'delete',
-            content: oldText.substring(oldPos, oldLcsPos),
-            position: newPos
-          });
-          oldPos = oldLcsPos;
-        }
-        
-        if (newPos < newLcsPos) {
-          operations.push({
-            type: 'add',
-            content: newText.substring(newPos, newLcsPos),
-            position: newPos
-          });
-          newPos = newLcsPos;
-        }
-        
-        oldPos++;
-        newPos++;
-        lcsPos++;
-      } else {
-        if (oldPos < oldText.length) {
-          operations.push({
-            type: 'delete',
-            content: oldText.substring(oldPos),
-            position: newPos
-          });
-          oldPos = oldText.length;
-        }
-        
-        if (newPos < newText.length) {
-          operations.push({
-            type: 'add',
-            content: newText.substring(newPos),
-            position: newPos
-          });
-          newPos = newText.length;
-        }
-      }
-    }
-    
-    return this._postProcessDiffs(operations);
-  }
-
-  _findLCS(text1, text2) {
-    const m = text1.length;
-    const n = text2.length;
-    const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
-    
-    for (let i = 1; i <= m; i++) {
-      for (let j = 1; j <= n; j++) {
-        if (text1[i - 1] === text2[j - 1]) {
-          dp[i][j] = dp[i - 1][j - 1] + 1;
-        } else {
-          dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-        }
-      }
-    }
-    
-    let lcs = '';
-    let i = m, j = n;
-    while (i > 0 && j > 0) {
-      if (text1[i - 1] === text2[j - 1]) {
-        lcs = text1[i - 1] + lcs;
-        i--;
-        j--;
-      } else if (dp[i - 1][j] > dp[i][j - 1]) {
-        i--;
-      } else {
-        j--;
-      }
-    }
-    
-    return lcs;
-  }
-
-  _postProcessDiffs(diffs) {
-    if (diffs.length === 0) return [];
-    
-    const merged = [];
-    let current = { ...diffs[0] };
-    
-    for (let i = 1; i < diffs.length; i++) {
-      const next = diffs[i];
-      
-      if (this._canMerge(current, next)) {
-        current.content += next.content;
-      } else {
-        merged.push(current);
-        current = { ...next };
-      }
-    }
-    
-    merged.push(current);
-    return merged;
-  }
-
-  _canMerge(current, next) {
-    if (current.type !== next.type) return false;
-    
-    if (current.type === 'add') {
-      return next.position === current.position + current.content.length;
-    } else {
-      return next.position === current.position;
-    }
+function debugLog(...args) {
+  if (DEBUG_MODE) {
+    console.log('[DEBUG]', ...args);
   }
 }
 
 /**
- * 文档片段管理器 - 核心类
+ * 文本差异计算器 - 使用 google-diff-match-patch
+ */
+class TextDiffCalculator {
+  constructor() {
+    this.dmp = new DiffMatchPatch();
+    // 设置超时时间（秒）
+    this.dmp.Diff_Timeout = 2.0;
+    // 设置编辑代价阈值
+    this.dmp.Diff_EditCost = 4;
+  }
+
+  /**
+   * 计算两个文本之间的差异
+   * 返回标准化的操作列表，按照旧文本的位置排序
+   */
+  calculateDiff(oldText, newText) {
+    if (!oldText && !newText) return [];
+    if (!oldText) return [{ type: 'insert', position: 0, content: newText }];
+    if (!newText) return [{ type: 'delete', position: 0, length: oldText.length, content: oldText }];
+
+    // 使用 diff-match-patch 计算差异
+    const diffs = this.dmp.diff_main(oldText, newText);
+    
+    // 优化差异结果，使其更符合语义
+    this.dmp.diff_cleanupSemantic(diffs);
+    
+    debugLog(`Diff结果数量: ${diffs.length}`);
+    
+    // 转换为操作列表，以旧文本的位置为基准
+    const operations = [];
+    let oldPos = 0;  // 在旧文本中的位置
+    let newPos = 0;  // 在新文本中的位置
+    
+    for (const [operation, text] of diffs) {
+      if (operation === DiffMatchPatch.DIFF_DELETE) {
+        // 删除操作：记录在旧文本中的位置
+        operations.push({
+          type: 'delete',
+          oldPosition: oldPos,
+          newPosition: newPos,
+          length: text.length,
+          content: text
+        });
+        debugLog(`删除操作: 旧位置=${oldPos}, 新位置=${newPos}, 长度=${text.length}, 内容="${text.substring(0, 20)}..."`);
+        oldPos += text.length;
+      } else if (operation === DiffMatchPatch.DIFF_INSERT) {
+        // 插入操作：记录在新文本中的位置
+        operations.push({
+          type: 'insert',
+          oldPosition: oldPos,
+          newPosition: newPos,
+          content: text
+        });
+        debugLog(`插入操作: 旧位置=${oldPos}, 新位置=${newPos}, 长度=${text.length}, 内容="${text.substring(0, 20)}..."`);
+        newPos += text.length;
+      } else if (operation === DiffMatchPatch.DIFF_EQUAL) {
+        // 未改变的部分
+        oldPos += text.length;
+        newPos += text.length;
+      }
+    }
+    
+    return operations;
+  }
+}
+
+/**
+ * 文档片段管理器 - 改进版
  */
 class DocumentSegmentManager {
   constructor() {
@@ -173,164 +122,248 @@ class DocumentSegmentManager {
       content: text,
       version: 0
     }];
+    debugLog(`文档初始化: ${text.length} 字符`);
   }
 
   /**
    * 应用变更到文档片段
    */
-  applyChanges(diffs, version) {
-    // 按位置从后往前排序，避免位置偏移
-    const sortedDiffs = [...diffs].sort((a, b) => b.position - a.position);
+  applyChanges(operations, version) {
+    debugLog(`\n应用 ${operations.length} 个操作到版本 ${version}`);
     
-    for (const diff of sortedDiffs) {
-      if (diff.type === 'delete') {
-        this._applyDeletion(diff.position, diff.content.length, version);
-      } else if (diff.type === 'add') {
-        this._applyAddition(diff.position, diff.content, version);
-      }
+    // 分离删除和插入操作
+    const deletes = operations.filter(op => op.type === 'delete' && op.length > 0);
+    const inserts = operations.filter(op => op.type === 'insert');
+    
+    // 先应用所有删除操作（从后往前，避免位置偏移）
+    // 使用 oldPosition（在旧文本中的位置）
+    const sortedDeletes = [...deletes].sort((a, b) => b.oldPosition - a.oldPosition);
+    for (const op of sortedDeletes) {
+      this._applyDeletion(op.oldPosition, op.length, version);
     }
+    
+    // 再应用插入操作（从前往后）
+    // 注意：删除后，文档变短了，需要重新映射插入位置
+    // 同时，每次插入后，后续的插入位置也需要调整
+    const sortedInserts = [...inserts].sort((a, b) => a.oldPosition - b.oldPosition);
+    let cumulativeInsertOffset = 0;  // 累积的插入偏移量
+    
+    for (const op of sortedInserts) {
+      // 1. 计算在应用删除后的基础位置
+      let basePosition = op.oldPosition;
+      for (const del of deletes) {
+        if (del.oldPosition < op.oldPosition) {
+          // 这个删除在当前插入之前，需要减去删除的长度
+          basePosition -= del.length;
+        }
+      }
+      
+      // 2. 加上之前插入操作的累积偏移
+      const actualPosition = basePosition + cumulativeInsertOffset;
+      
+      debugLog(`    插入调整: 旧位置=${op.oldPosition}, 基础位置=${basePosition}, 累积偏移=${cumulativeInsertOffset}, 实际位置=${actualPosition}`);
+      
+      this._applyInsertion(actualPosition, op.content, version);
+      
+      // 3. 更新累积偏移
+      cumulativeInsertOffset += op.content.length;
+    }
+    
+    // 合并相邻的同类型片段
+    this._mergeAdjacentSegments();
+    
+    debugLog(`片段数量: ${this.segments.length}`);
   }
 
   /**
    * 应用删除操作
    */
   _applyDeletion(position, length, version) {
-    const location = this._findLocation(position);
-    if (!location) return;
-
-    let { segmentIndex, offset } = location;
+    debugLog(`  执行删除: 位置=${position}, 长度=${length}`);
+    
+    // 找到删除的起始位置
+    let currentPos = 0;
     let remainingLength = length;
-
-    while (remainingLength > 0 && segmentIndex < this.segments.length) {
+    let segmentIndex = 0;
+    
+    // 定位到起始片段
+    while (segmentIndex < this.segments.length && remainingLength > 0) {
       const segment = this.segments[segmentIndex];
-
+      
       if (segment.type !== 'normal') {
         segmentIndex++;
         continue;
       }
-
-      const availableLength = segment.content.length - offset;
-      const deleteLength = Math.min(remainingLength, availableLength);
-
-      if (offset === 0 && deleteLength === segment.content.length) {
+      
+      const segmentEndPos = currentPos + segment.content.length;
+      
+      if (position >= segmentEndPos) {
+        // 删除位置在这个片段之后
+        currentPos = segmentEndPos;
+        segmentIndex++;
+        continue;
+      }
+      
+      // 删除位置在当前片段内或之前
+      const offsetInSegment = Math.max(0, position - currentPos);
+      const deleteInThisSegment = Math.min(remainingLength, segment.content.length - offsetInSegment);
+      
+      debugLog(`    片段 ${segmentIndex}: 偏移=${offsetInSegment}, 删除=${deleteInThisSegment}`);
+      
+      if (offsetInSegment === 0 && deleteInThisSegment === segment.content.length) {
         // 删除整个片段
         segment.type = 'deleted';
         segment.deletedAt = version;
-        segmentIndex++;
-      } else if (offset === 0) {
+        debugLog(`    标记整个片段为删除`);
+      } else if (offsetInSegment === 0) {
         // 删除片段开头部分
-        const deletedPart = segment.content.substring(0, deleteLength);
-        const remainingPart = segment.content.substring(deleteLength);
-
+        const deletedPart = segment.content.substring(0, deleteInThisSegment);
+        const remainingPart = segment.content.substring(deleteInThisSegment);
+        
         this.segments.splice(segmentIndex, 1,
           { type: 'deleted', content: deletedPart, version: segment.version, deletedAt: version },
           { type: 'normal', content: remainingPart, version: segment.version }
         );
-        segmentIndex += 2;
-      } else if (offset + deleteLength === segment.content.length) {
+        debugLog(`    分割片段: 删除开头 ${deleteInThisSegment} 字符`);
+      } else if (offsetInSegment + deleteInThisSegment === segment.content.length) {
         // 删除片段末尾部分
-        const keepPart = segment.content.substring(0, offset);
-        const deletedPart = segment.content.substring(offset);
-
+        const keepPart = segment.content.substring(0, offsetInSegment);
+        const deletedPart = segment.content.substring(offsetInSegment);
+        
         this.segments.splice(segmentIndex, 1,
           { type: 'normal', content: keepPart, version: segment.version },
           { type: 'deleted', content: deletedPart, version: segment.version, deletedAt: version }
         );
-        segmentIndex += 2;
+        debugLog(`    分割片段: 删除末尾 ${deleteInThisSegment} 字符`);
       } else {
         // 删除片段中间部分
-        const beforePart = segment.content.substring(0, offset);
-        const deletedPart = segment.content.substring(offset, offset + deleteLength);
-        const afterPart = segment.content.substring(offset + deleteLength);
-
+        const beforePart = segment.content.substring(0, offsetInSegment);
+        const deletedPart = segment.content.substring(offsetInSegment, offsetInSegment + deleteInThisSegment);
+        const afterPart = segment.content.substring(offsetInSegment + deleteInThisSegment);
+        
         this.segments.splice(segmentIndex, 1,
           { type: 'normal', content: beforePart, version: segment.version },
           { type: 'deleted', content: deletedPart, version: segment.version, deletedAt: version },
           { type: 'normal', content: afterPart, version: segment.version }
         );
-        segmentIndex += 3;
+        debugLog(`    分割片段: 删除中间 ${deleteInThisSegment} 字符`);
       }
-
-      remainingLength -= deleteLength;
-      offset = 0;  // 后续片段从头开始
+      
+      remainingLength -= deleteInThisSegment;
+      currentPos += segment.content.length;
+      segmentIndex++;
+    }
+    
+    if (remainingLength > 0) {
+      console.warn(`⚠️ 警告: 删除操作未完全执行，剩余 ${remainingLength} 字符`);
     }
   }
 
   /**
-   * 应用添加操作
+   * 应用插入操作
    */
-  _applyAddition(position, content, version) {
-    const location = this._findLocation(position);
+  _applyInsertion(position, content, version) {
+    debugLog(`  执行插入: 位置=${position}, 内容长度=${content.length}`);
     
-    if (!location) {
-      // 位置在末尾，追加
+    let currentPos = 0;
+    let lastNormalSegmentIndex = -1;
+    let totalNormalLength = 0;
+    
+    // 首先计算所有 normal 片段的总长度和最后一个 normal 片段的索引
+    for (let i = 0; i < this.segments.length; i++) {
+      if (this.segments[i].type === 'normal') {
+        totalNormalLength += this.segments[i].content.length;
+        lastNormalSegmentIndex = i;
+      }
+    }
+    
+    // 如果插入位置等于所有 normal 文本的总长度，追加到文档末尾
+    if (position === totalNormalLength) {
       this.segments.push({
         type: 'normal',
         content: content,
         version: version
       });
+      debugLog(`    追加到文档末尾（位置 ${position} = 总 normal 长度 ${totalNormalLength}）`);
       return;
     }
-
-    const { segmentIndex, offset } = location;
-    const segment = this.segments[segmentIndex];
-
-    if (offset === 0) {
-      // 在片段开头插入
-      this.segments.splice(segmentIndex, 0, {
-        type: 'normal',
-        content: content,
-        version: version
-      });
-    } else if (offset === segment.content.length) {
-      // 在片段末尾插入
-      this.segments.splice(segmentIndex + 1, 0, {
-        type: 'normal',
-        content: content,
-        version: version
-      });
-    } else {
-      // 在片段中间插入，需要分割
-      const beforePart = segment.content.substring(0, offset);
-      const afterPart = segment.content.substring(offset);
-
-      this.segments.splice(segmentIndex, 1,
-        { type: 'normal', content: beforePart, version: segment.version },
-        { type: 'normal', content: content, version: version },
-        { type: 'normal', content: afterPart, version: segment.version }
-      );
+    
+    // 否则，查找具体的插入位置
+    currentPos = 0;
+    for (let i = 0; i < this.segments.length; i++) {
+      const segment = this.segments[i];
+      
+      if (segment.type !== 'normal') {
+        continue;
+      }
+      
+      const segmentEndPos = currentPos + segment.content.length;
+      
+      if (position === currentPos) {
+        // 在片段开头插入
+        this.segments.splice(i, 0, {
+          type: 'normal',
+          content: content,
+          version: version
+        });
+        debugLog(`    在片段 ${i} 前插入`);
+        return;
+      } else if (position > currentPos && position < segmentEndPos) {
+        // 在片段中间插入，需要分割
+        const offset = position - currentPos;
+        const beforePart = segment.content.substring(0, offset);
+        const afterPart = segment.content.substring(offset);
+        
+        this.segments.splice(i, 1,
+          { type: 'normal', content: beforePart, version: segment.version },
+          { type: 'normal', content: content, version: version },
+          { type: 'normal', content: afterPart, version: segment.version }
+        );
+        debugLog(`    在片段 ${i} 中间插入（偏移 ${offset}）`);
+        return;
+      }
+      
+      currentPos = segmentEndPos;
     }
+    
+    // 如果到这里还没插入，追加到最后（兜底）
+    this.segments.push({
+      type: 'normal',
+      content: content,
+      version: version
+    });
+    debugLog(`    追加到末尾（兜底）`);
   }
 
   /**
-   * 查找位置对应的片段和偏移
+   * 合并相邻的同类型片段
    */
-  _findLocation(position) {
-    let currentPos = 0;
-
-    for (let i = 0; i < this.segments.length; i++) {
-      const segment = this.segments[i];
-
-      if (segment.type === 'normal') {
-        if (currentPos + segment.content.length > position) {
-          return {
-            segmentIndex: i,
-            offset: position - currentPos
-          };
-        }
-        currentPos += segment.content.length;
+  _mergeAdjacentSegments() {
+    if (this.segments.length <= 1) return;
+    
+    const merged = [this.segments[0]];
+    
+    for (let i = 1; i < this.segments.length; i++) {
+      const prev = merged[merged.length - 1];
+      const curr = this.segments[i];
+      
+      // 合并条件：类型相同，版本相同
+      if (prev.type === curr.type && 
+          prev.type === 'normal' && 
+          prev.version === curr.version) {
+        prev.content += curr.content;
+        debugLog(`    合并片段: ${i-1} 和 ${i}`);
+      } else if (prev.type === curr.type && 
+                 prev.type === 'deleted' && 
+                 prev.deletedAt === curr.deletedAt) {
+        prev.content += curr.content;
+        debugLog(`    合并删除片段: ${i-1} 和 ${i}`);
+      } else {
+        merged.push(curr);
       }
     }
-
-    // 位置在末尾
-    if (currentPos === position) {
-      return {
-        segmentIndex: this.segments.length,
-        offset: 0
-      };
-    }
-
-    return null;
+    
+    this.segments = merged;
   }
 
   /**
@@ -351,7 +384,7 @@ class DocumentSegmentManager {
   }
 
   /**
-   * 提取纯净文本
+   * 提取纯净文本（只包含 normal 片段）
    */
   extractPureText() {
     let result = '';
@@ -383,10 +416,23 @@ class DocumentSegmentManager {
     
     return deletions;
   }
+
+  /**
+   * 获取调试信息
+   */
+  getDebugInfo() {
+    return {
+      totalSegments: this.segments.length,
+      normalSegments: this.segments.filter(s => s.type === 'normal').length,
+      deletedSegments: this.segments.filter(s => s.type === 'deleted').length,
+      totalLength: this.segments.reduce((sum, s) => sum + s.content.length, 0),
+      pureTextLength: this.extractPureText().length
+    };
+  }
 }
 
 /**
- * 快照构建器 V3
+ * 快照构建器 V3 - 改进版
  */
 class SnapshotBuilderV3 {
   constructor() {
@@ -405,10 +451,16 @@ class SnapshotBuilderV3 {
    * 应用版本变更
    */
   applyVersion(prevContent, currContent, version) {
-    const diffs = this.diffCalculator.calculateDiff(prevContent, currContent);
+    debugLog(`\n=== 应用版本 ${version} ===`);
+    debugLog(`上一版本长度: ${prevContent.length}`);
+    debugLog(`当前版本长度: ${currContent.length}`);
     
-    if (diffs.length > 0) {
-      this.docManager.applyChanges(diffs, version);
+    const operations = this.diffCalculator.calculateDiff(prevContent, currContent);
+    
+    if (operations.length > 0) {
+      this.docManager.applyChanges(operations, version);
+    } else {
+      debugLog(`版本 ${version} 无变更`);
     }
   }
 
@@ -419,7 +471,46 @@ class SnapshotBuilderV3 {
     return {
       snapshot: this.docManager.renderSnapshot(),
       pureText: this.docManager.extractPureText(),
-      deletions: this.docManager.getDeletions()
+      deletions: this.docManager.getDeletions(),
+      debugInfo: this.docManager.getDebugInfo()
+    };
+  }
+
+  /**
+   * 验证快照正确性
+   * 确保删除 [deleted:*] 标记后的文本与期望的文本一致
+   */
+  validateSnapshot(expectedText) {
+    const pureText = this.docManager.extractPureText();
+    const isValid = pureText === expectedText;
+    
+    if (!isValid) {
+      console.error(`\n❌ 快照验证失败！`);
+      console.error(`期望文本长度: ${expectedText.length}`);
+      console.error(`实际文本长度: ${pureText.length}`);
+      console.error(`差异字符数: ${Math.abs(expectedText.length - pureText.length)}`);
+      
+      // 显示前100个字符的对比
+      console.error(`\n期望文本（前100字符）: "${expectedText.substring(0, 100)}"`);
+      console.error(`实际文本（前100字符）: "${pureText.substring(0, 100)}"`);
+      
+      // 找出第一个不同的位置
+      for (let i = 0; i < Math.min(expectedText.length, pureText.length); i++) {
+        if (expectedText[i] !== pureText[i]) {
+          console.error(`\n第一个差异位置: ${i}`);
+          console.error(`期望字符: '${expectedText[i]}' (${expectedText.charCodeAt(i)})`);
+          console.error(`实际字符: '${pureText[i]}' (${pureText.charCodeAt(i)})`);
+          console.error(`上下文: "${expectedText.substring(Math.max(0, i-10), i+10)}"`);
+          break;
+        }
+      }
+    }
+    
+    return {
+      isValid,
+      expectedLength: expectedText.length,
+      actualLength: pureText.length,
+      difference: Math.abs(expectedText.length - pureText.length)
     };
   }
 }
@@ -538,14 +629,16 @@ class PadSnapshotGeneratorV3 {
   constructor() {
     this.db = new DatabaseManager();
     this.snapshotBuilder = new SnapshotBuilderV3();
+    this.validationErrors = [];
   }
 
   async generateSnapshots(padId) {
     console.log(`\n${'='.repeat(70)}`);
-    console.log(`🚀 Pad 版本快照生成工具 V3 - 文档片段法`);
+    console.log(`🚀 Pad 版本快照生成工具 V3 - 改进版`);
     console.log(`${'='.repeat(70)}`);
     console.log(`📝 目标 Pad: ${padId}`);
     console.log(`⏰ 开始时间: ${new Date().toLocaleString('zh-CN')}`);
+    console.log(`🔍 调试模式: ${DEBUG_MODE ? '开启' : '关闭'}`);
     console.log(`${'='.repeat(70)}\n`);
 
     try {
@@ -567,14 +660,25 @@ class PadSnapshotGeneratorV3 {
       await this.db.clearPadSnapshots(padId);
 
       console.log('📸 开始构建版本快照...');
-      console.log(`   总版本数: ${versions.length}`);
+      console.log(`   总版本数: ${versions.length}\n`);
       
       const snapshots = [];
 
       // 初始化第一个版本
-      this.snapshotBuilder.initialize(versions[0].content || '');
+      const firstContent = versions[0].content || '';
+      this.snapshotBuilder.initialize(firstContent);
       
       const firstSnapshot = this.snapshotBuilder.getSnapshot();
+      
+      // 验证第一个版本
+      const firstValidation = this.snapshotBuilder.validateSnapshot(firstContent);
+      if (!firstValidation.isValid) {
+        this.validationErrors.push({ revision: versions[0].revision, ...firstValidation });
+        console.error(`❌ 版本 ${versions[0].revision} 验证失败`);
+      } else {
+        console.log(`✅ 版本 ${versions[0].revision} 验证通过`);
+      }
+      
       snapshots.push({
         pad_id: padId,
         revision: versions[0].revision,
@@ -590,6 +694,8 @@ class PadSnapshotGeneratorV3 {
       for (let i = 1; i < versions.length; i++) {
         const prevVersion = versions[i - 1];
         const currVersion = versions[i];
+        
+        console.log(`\n处理版本 ${currVersion.revision} (${i + 1}/${versions.length})...`);
 
         this.snapshotBuilder.applyVersion(
           prevVersion.content || '',
@@ -598,6 +704,19 @@ class PadSnapshotGeneratorV3 {
         );
 
         const result = this.snapshotBuilder.getSnapshot();
+        
+        // 验证快照
+        const validation = this.snapshotBuilder.validateSnapshot(currVersion.content || '');
+        if (!validation.isValid) {
+          this.validationErrors.push({ revision: currVersion.revision, ...validation });
+          console.error(`❌ 版本 ${currVersion.revision} 验证失败`);
+        } else {
+          console.log(`✅ 版本 ${currVersion.revision} 验证通过`);
+        }
+        
+        if (DEBUG_MODE) {
+          console.log('调试信息:', result.debugInfo);
+        }
 
         snapshots.push({
           pad_id: padId,
@@ -609,13 +728,9 @@ class PadSnapshotGeneratorV3 {
           deletion_count: result.deletions.length,
           deletions: result.deletions
         });
-
-        if ((i + 1) % 10 === 0 || i === versions.length - 1) {
-          console.log(`   ✓ 处理进度: ${i + 1}/${versions.length}`);
-        }
       }
 
-      console.log('✅ 快照构建完成\n');
+      console.log('\n✅ 快照构建完成\n');
 
       await this.db.insertSnapshots(snapshots);
 
@@ -625,6 +740,16 @@ class PadSnapshotGeneratorV3 {
       console.log(`Pad ID: ${padId}`);
       console.log(`总版本数: ${versions.length}`);
       console.log(`累积删除次数: ${snapshots[snapshots.length - 1].deletion_count}`);
+      console.log(`验证错误数: ${this.validationErrors.length}`);
+      
+      if (this.validationErrors.length > 0) {
+        console.log(`\n⚠️ 警告: 发现 ${this.validationErrors.length} 个版本验证失败`);
+        console.log('失败的版本:');
+        this.validationErrors.forEach(err => {
+          console.log(`  - 版本 ${err.revision}: 期望长度=${err.expectedLength}, 实际长度=${err.actualLength}, 差异=${err.difference}`);
+        });
+      }
+      
       console.log(`${'='.repeat(70)}\n`);
 
     } catch (error) {
@@ -641,18 +766,28 @@ class PadSnapshotGeneratorV3 {
  * 主函数
  */
 async function main() {
-  const padId = process.argv[2];
+  const args = process.argv.slice(2);
+  const padId = args.find(arg => !arg.startsWith('--'));
+  DEBUG_MODE = args.includes('--debug') || args.includes('-d');
   
-  if (!padId || padId === '--help' || padId === '-h') {
+  if (!padId || args.includes('--help') || args.includes('-h')) {
     console.log(`
-使用方法: node ${path.basename(__filename)} <padId>
+使用方法: node ${path.basename(__filename)} <padId> [选项]
+
+参数:
+  <padId>        要生成快照的 Pad ID
+
+选项:
+  --debug, -d    开启调试模式，显示详细日志
+  --help, -h     显示帮助信息
 
 示例:
   node ${path.basename(__filename)} room-229
+  node ${path.basename(__filename)} room-229 --debug
 
 说明:
-  V3 最终版 - 使用文档片段法
-  维护文档片段列表，精确追踪每个删除操作的位置
+  V3 改进版 - 使用 google-diff-match-patch 进行精确差异计算
+  支持快照验证，确保生成的快照正确性
     `);
     process.exit(0);
   }
@@ -674,4 +809,3 @@ if (require.main === module) {
 }
 
 module.exports = { PadSnapshotGeneratorV3, SnapshotBuilderV3, DocumentSegmentManager };
-
