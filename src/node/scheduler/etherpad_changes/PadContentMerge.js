@@ -4,7 +4,7 @@ const fs = require('fs');
 
 // 读取数据库配置
 function getDatabaseConfig() {
-  const settingsPath = path.join(__dirname, '../../../settings.json');
+  const settingsPath = path.join(__dirname, '../../../../settings.json');
   if (!fs.existsSync(settingsPath)) {
     throw new Error('settings.json not found');
   }
