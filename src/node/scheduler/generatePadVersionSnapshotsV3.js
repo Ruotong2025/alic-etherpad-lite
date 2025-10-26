@@ -116,11 +116,13 @@ class DocumentSegmentManager {
   /**
    * 初始化文档
    */
-  initialize(text) {
+  initialize(text, authorId, timestamp) {
     this.segments = [{
       type: 'normal',
       content: text,
-      version: 0
+      version: 0,
+      author: authorId || '',
+      timestamp: timestamp || Date.now()
     }];
     debugLog(`文档初始化: ${text.length} 字符`);
   }
@@ -128,7 +130,7 @@ class DocumentSegmentManager {
   /**
    * 应用变更到文档片段
    */
-  applyChanges(operations, version) {
+  applyChanges(operations, version, authorId, timestamp) {
     debugLog(`\n应用 ${operations.length} 个操作到版本 ${version}`);
     
     // 分离删除和插入操作
@@ -139,7 +141,7 @@ class DocumentSegmentManager {
     // 使用 oldPosition（在旧文本中的位置）
     const sortedDeletes = [...deletes].sort((a, b) => b.oldPosition - a.oldPosition);
     for (const op of sortedDeletes) {
-      this._applyDeletion(op.oldPosition, op.length, version);
+      this._applyDeletion(op.oldPosition, op.length, version, authorId, timestamp);
     }
     
     // 再应用插入操作（从前往后）
@@ -163,7 +165,7 @@ class DocumentSegmentManager {
       
       debugLog(`    插入调整: 旧位置=${op.oldPosition}, 基础位置=${basePosition}, 累积偏移=${cumulativeInsertOffset}, 实际位置=${actualPosition}`);
       
-      this._applyInsertion(actualPosition, op.content, version);
+      this._applyInsertion(actualPosition, op.content, version, authorId, timestamp);
       
       // 3. 更新累积偏移
       cumulativeInsertOffset += op.content.length;
@@ -178,7 +180,7 @@ class DocumentSegmentManager {
   /**
    * 应用删除操作
    */
-  _applyDeletion(position, length, version) {
+  _applyDeletion(position, length, version, authorId, timestamp) {
     debugLog(`  执行删除: 位置=${position}, 长度=${length}`);
     
     // 找到删除的起始位置
@@ -214,6 +216,8 @@ class DocumentSegmentManager {
         // 删除整个片段
         segment.type = 'deleted';
         segment.deletedAt = version;
+        segment.deletedAuthor = authorId;
+        segment.deletedTimestamp = timestamp;
         debugLog(`    标记整个片段为删除`);
       } else if (offsetInSegment === 0) {
         // 删除片段开头部分
@@ -221,8 +225,23 @@ class DocumentSegmentManager {
         const remainingPart = segment.content.substring(deleteInThisSegment);
         
         this.segments.splice(segmentIndex, 1,
-          { type: 'deleted', content: deletedPart, version: segment.version, deletedAt: version },
-          { type: 'normal', content: remainingPart, version: segment.version }
+          { 
+            type: 'deleted', 
+            content: deletedPart, 
+            version: segment.version, 
+            author: segment.author,
+            timestamp: segment.timestamp,
+            deletedAt: version,
+            deletedAuthor: authorId,
+            deletedTimestamp: timestamp
+          },
+          { 
+            type: 'normal', 
+            content: remainingPart, 
+            version: segment.version,
+            author: segment.author,
+            timestamp: segment.timestamp
+          }
         );
         debugLog(`    分割片段: 删除开头 ${deleteInThisSegment} 字符`);
       } else if (offsetInSegment + deleteInThisSegment === segment.content.length) {
@@ -231,8 +250,23 @@ class DocumentSegmentManager {
         const deletedPart = segment.content.substring(offsetInSegment);
         
         this.segments.splice(segmentIndex, 1,
-          { type: 'normal', content: keepPart, version: segment.version },
-          { type: 'deleted', content: deletedPart, version: segment.version, deletedAt: version }
+          { 
+            type: 'normal', 
+            content: keepPart, 
+            version: segment.version,
+            author: segment.author,
+            timestamp: segment.timestamp
+          },
+          { 
+            type: 'deleted', 
+            content: deletedPart, 
+            version: segment.version,
+            author: segment.author,
+            timestamp: segment.timestamp,
+            deletedAt: version,
+            deletedAuthor: authorId,
+            deletedTimestamp: timestamp
+          }
         );
         debugLog(`    分割片段: 删除末尾 ${deleteInThisSegment} 字符`);
       } else {
@@ -242,9 +276,30 @@ class DocumentSegmentManager {
         const afterPart = segment.content.substring(offsetInSegment + deleteInThisSegment);
         
         this.segments.splice(segmentIndex, 1,
-          { type: 'normal', content: beforePart, version: segment.version },
-          { type: 'deleted', content: deletedPart, version: segment.version, deletedAt: version },
-          { type: 'normal', content: afterPart, version: segment.version }
+          { 
+            type: 'normal', 
+            content: beforePart, 
+            version: segment.version,
+            author: segment.author,
+            timestamp: segment.timestamp
+          },
+          { 
+            type: 'deleted', 
+            content: deletedPart, 
+            version: segment.version,
+            author: segment.author,
+            timestamp: segment.timestamp,
+            deletedAt: version,
+            deletedAuthor: authorId,
+            deletedTimestamp: timestamp
+          },
+          { 
+            type: 'normal', 
+            content: afterPart, 
+            version: segment.version,
+            author: segment.author,
+            timestamp: segment.timestamp
+          }
         );
         debugLog(`    分割片段: 删除中间 ${deleteInThisSegment} 字符`);
       }
@@ -262,7 +317,7 @@ class DocumentSegmentManager {
   /**
    * 应用插入操作
    */
-  _applyInsertion(position, content, version) {
+  _applyInsertion(position, content, version, authorId, timestamp) {
     debugLog(`  执行插入: 位置=${position}, 内容长度=${content.length}`);
     
     let currentPos = 0;
@@ -282,7 +337,9 @@ class DocumentSegmentManager {
       this.segments.push({
         type: 'normal',
         content: content,
-        version: version
+        version: version,
+        author: authorId,
+        timestamp: timestamp
       });
       debugLog(`    追加到文档末尾（位置 ${position} = 总 normal 长度 ${totalNormalLength}）`);
       return;
@@ -304,7 +361,9 @@ class DocumentSegmentManager {
         this.segments.splice(i, 0, {
           type: 'normal',
           content: content,
-          version: version
+          version: version,
+          author: authorId,
+          timestamp: timestamp
         });
         debugLog(`    在片段 ${i} 前插入`);
         return;
@@ -315,9 +374,27 @@ class DocumentSegmentManager {
         const afterPart = segment.content.substring(offset);
         
         this.segments.splice(i, 1,
-          { type: 'normal', content: beforePart, version: segment.version },
-          { type: 'normal', content: content, version: version },
-          { type: 'normal', content: afterPart, version: segment.version }
+          { 
+            type: 'normal', 
+            content: beforePart, 
+            version: segment.version,
+            author: segment.author,
+            timestamp: segment.timestamp
+          },
+          { 
+            type: 'normal', 
+            content: content, 
+            version: version,
+            author: authorId,
+            timestamp: timestamp
+          },
+          { 
+            type: 'normal', 
+            content: afterPart, 
+            version: segment.version,
+            author: segment.author,
+            timestamp: segment.timestamp
+          }
         );
         debugLog(`    在片段 ${i} 中间插入（偏移 ${offset}）`);
         return;
@@ -330,7 +407,9 @@ class DocumentSegmentManager {
     this.segments.push({
       type: 'normal',
       content: content,
-      version: version
+      version: version,
+      author: authorId,
+      timestamp: timestamp
     });
     debugLog(`    追加到末尾（兜底）`);
   }
@@ -367,7 +446,7 @@ class DocumentSegmentManager {
   }
 
   /**
-   * 渲染为快照文本
+   * 渲染为快照文本（只包含 normal 片段，不再使用 [deleted:...] 标记）
    */
   renderSnapshot() {
     let result = '';
@@ -375,9 +454,8 @@ class DocumentSegmentManager {
     for (const segment of this.segments) {
       if (segment.type === 'normal') {
         result += segment.content;
-      } else if (segment.type === 'deleted') {
-        result += `[deleted:${segment.content}]`;
       }
+      // 不再渲染删除标记
     }
     
     return result;
@@ -429,6 +507,95 @@ class DocumentSegmentManager {
       pureTextLength: this.extractPureText().length
     };
   }
+
+  /**
+   * 将时间戳转换为香港时间格式
+   */
+  formatHKTime(timestamp) {
+    if (!timestamp) return '';
+    
+    const date = new Date(timestamp);
+    
+    // 转换为香港时间字符串（UTC+8）
+    const hkTimeStr = date.toLocaleString('zh-CN', {
+      timeZone: 'Asia/Hong_Kong',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    });
+    
+    // 格式化为 YYYY-MM-DD HH:mm:ss
+    // toLocaleString 返回格式可能是 "2025/10/26 20:30:00" 或 "2025-10-26 20:30:00"
+    return hkTimeStr.replace(/\//g, '-').replace(',', '');
+  }
+
+  /**
+   * 构建操作历史数组
+   */
+  buildOperationHistory() {
+    const history = [];
+    
+    for (const segment of this.segments) {
+      if (segment.type === 'normal') {
+        // 添加操作
+        history.push({
+          behavior: 'add',
+          author: segment.author || '',
+          start_time: this.formatHKTime(segment.timestamp),
+          end_time: this.formatHKTime(segment.timestamp),
+          content: segment.content
+        });
+      } else if (segment.type === 'deleted') {
+        // 删除操作
+        history.push({
+          behavior: 'deleted',
+          author: segment.deletedAuthor || segment.author || '',
+          start_time: this.formatHKTime(segment.timestamp),
+          end_time: this.formatHKTime(segment.deletedTimestamp),
+          content: segment.content
+        });
+      }
+    }
+    
+    return history;
+  }
+
+  /**
+   * 合并连续的相同操作
+   * 只合并 behavior 和 author 都相同的连续操作
+   */
+  mergeOperations(history) {
+    if (history.length === 0) return [];
+    
+    const merged = [];
+    let current = { ...history[0] };
+    
+    for (let i = 1; i < history.length; i++) {
+      const next = history[i];
+      
+      // 如果 behavior 和 author 都相同，合并
+      if (current.behavior === next.behavior && 
+          current.author === next.author) {
+        // 拼接内容
+        current.content += next.content;
+        // 更新 end_time 为最新的
+        current.end_time = next.end_time;
+      } else {
+        // 不同，保存当前的，开始新的
+        merged.push(current);
+        current = { ...next };
+      }
+    }
+    
+    // 添加最后一个
+    merged.push(current);
+    
+    return merged;
+  }
 }
 
 /**
@@ -443,14 +610,14 @@ class SnapshotBuilderV3 {
   /**
    * 初始化第一个版本
    */
-  initialize(text) {
-    this.docManager.initialize(text);
+  initialize(text, authorId, timestamp) {
+    this.docManager.initialize(text, authorId, timestamp);
   }
 
   /**
    * 应用版本变更
    */
-  applyVersion(prevContent, currContent, version) {
+  applyVersion(prevContent, currContent, version, authorId, timestamp) {
     debugLog(`\n=== 应用版本 ${version} ===`);
     debugLog(`上一版本长度: ${prevContent.length}`);
     debugLog(`当前版本长度: ${currContent.length}`);
@@ -458,7 +625,7 @@ class SnapshotBuilderV3 {
     const operations = this.diffCalculator.calculateDiff(prevContent, currContent);
     
     if (operations.length > 0) {
-      this.docManager.applyChanges(operations, version);
+      this.docManager.applyChanges(operations, version, authorId, timestamp);
     } else {
       debugLog(`版本 ${version} 无变更`);
     }
@@ -468,10 +635,15 @@ class SnapshotBuilderV3 {
    * 获取当前快照
    */
   getSnapshot() {
+    // 构建操作历史
+    const rawHistory = this.docManager.buildOperationHistory();
+    const mergedHistory = this.docManager.mergeOperations(rawHistory);
+    
     return {
       snapshot: this.docManager.renderSnapshot(),
       pureText: this.docManager.extractPureText(),
       deletions: this.docManager.getDeletions(),
+      operationHistory: mergedHistory,  // 新增：操作历史数组
       debugInfo: this.docManager.getDebugInfo()
     };
   }
@@ -594,7 +766,7 @@ class DatabaseManager {
       snapshot.author_id,
       snapshot.timestamp,
       snapshot.deletion_count,
-      JSON.stringify(snapshot.deletions)
+      JSON.stringify(snapshot.operation_history)  // 使用 operation_history 替代 deletions
     ]);
   }
 
@@ -666,7 +838,10 @@ class PadSnapshotGeneratorV3 {
 
       // 初始化第一个版本
       const firstContent = versions[0].content || '';
-      this.snapshotBuilder.initialize(firstContent);
+      const firstAuthorId = versions[0].author_id || '';
+      const firstTimestamp = versions[0].timestamp || Date.now();
+      
+      this.snapshotBuilder.initialize(firstContent, firstAuthorId, firstTimestamp);
       
       const firstSnapshot = this.snapshotBuilder.getSnapshot();
       
@@ -684,10 +859,10 @@ class PadSnapshotGeneratorV3 {
         revision: versions[0].revision,
         snapshot_text: firstSnapshot.snapshot,
         pure_text: firstSnapshot.pureText,
-        author_id: versions[0].author_id || '',
-        timestamp: versions[0].timestamp || Date.now(),
-        deletion_count: 0,
-        deletions: []
+        author_id: firstAuthorId,
+        timestamp: firstTimestamp,
+        deletion_count: firstSnapshot.operationHistory.filter(op => op.behavior === 'deleted').length,
+        operation_history: firstSnapshot.operationHistory
       });
 
       // 逐版本处理
@@ -700,7 +875,9 @@ class PadSnapshotGeneratorV3 {
         this.snapshotBuilder.applyVersion(
           prevVersion.content || '',
           currVersion.content || '',
-          currVersion.revision
+          currVersion.revision,
+          currVersion.author_id || '',
+          currVersion.timestamp || Date.now()
         );
 
         const result = this.snapshotBuilder.getSnapshot();
@@ -716,6 +893,7 @@ class PadSnapshotGeneratorV3 {
         
         if (DEBUG_MODE) {
           console.log('调试信息:', result.debugInfo);
+          console.log('操作历史数量:', result.operationHistory.length);
         }
 
         snapshots.push({
@@ -725,8 +903,8 @@ class PadSnapshotGeneratorV3 {
           pure_text: result.pureText,
           author_id: currVersion.author_id || '',
           timestamp: currVersion.timestamp || Date.now(),
-          deletion_count: result.deletions.length,
-          deletions: result.deletions
+          deletion_count: result.operationHistory.filter(op => op.behavior === 'deleted').length,
+          operation_history: result.operationHistory
         });
       }
 
