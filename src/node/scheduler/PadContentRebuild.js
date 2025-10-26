@@ -62,71 +62,6 @@ const padId = process.argv[2];
     });
     console.log('✓ MySQL 数据库连接成功');
 
-    // 创建 pad_version_contents 表（如果不存在）
-    console.log('🔧 检查/创建 pad_version_contents 表...');
-    
-    // 先检查表是否存在
-    const [tables] = await mysqlConnection.execute(`
-      SELECT COUNT(*) as count FROM information_schema.tables 
-      WHERE table_schema = ? AND table_name = 'pad_version_contents'
-    `, [settings.dbSettings.database]);
-    
-    if (tables[0].count === 0) {
-      // 表不存在，创建新表
-      await mysqlConnection.execute(`
-        CREATE TABLE pad_version_contents (
-          id BIGINT AUTO_INCREMENT PRIMARY KEY,
-          pad_id VARCHAR(255) NOT NULL,
-          revision INT NOT NULL,
-          content LONGTEXT NOT NULL,
-          author_id VARCHAR(255) DEFAULT '',
-          timestamp BIGINT NOT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          UNIQUE KEY unique_pad_revision (pad_id, revision)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `);
-      console.log('✓ 创建了新的 pad_version_contents 表');
-    } else {
-      // 表存在，检查表结构并调整
-      const [columns] = await mysqlConnection.execute(`
-        SELECT COLUMN_NAME FROM information_schema.columns 
-        WHERE table_schema = ? AND table_name = 'pad_version_contents'
-      `, [settings.dbSettings.database]);
-      
-      const existingColumns = columns.map(col => col.COLUMN_NAME.toLowerCase());
-      
-      // 删除不需要的列
-      if (existingColumns.includes('author')) {
-        await mysqlConnection.execute(`ALTER TABLE pad_version_contents DROP COLUMN author`);
-        console.log('✓ 删除了 author 列');
-      }
-      if (existingColumns.includes('text_length')) {
-        await mysqlConnection.execute(`ALTER TABLE pad_version_contents DROP COLUMN text_length`);
-        console.log('✓ 删除了 text_length 列');
-      }
-      if (existingColumns.includes('attribs')) {
-        await mysqlConnection.execute(`ALTER TABLE pad_version_contents DROP COLUMN attribs`);
-        console.log('✓ 删除了 attribs 列');
-      }
-      if (existingColumns.includes('changeset')) {
-        await mysqlConnection.execute(`ALTER TABLE pad_version_contents DROP COLUMN changeset`);
-        console.log('✓ 删除了 changeset 列');
-      }
-      
-      // 添加需要的列
-      if (!existingColumns.includes('author_id')) {
-        await mysqlConnection.execute(`ALTER TABLE pad_version_contents ADD COLUMN author_id VARCHAR(255) DEFAULT ''`);
-        console.log('✓ 添加了 author_id 列');
-      }
-      if (!existingColumns.includes('timestamp')) {
-        await mysqlConnection.execute(`ALTER TABLE pad_version_contents ADD COLUMN timestamp BIGINT NOT NULL DEFAULT 0`);
-        console.log('✓ 添加了 timestamp 列');
-      }
-      // changeset 列已被移除，不再需要添加
-      
-      console.log('✓ pad_version_contents 表结构调整完成');
-    }
-
     // 获取 Changeset 核心函数 - 这些就是 timeslider 使用的函数
     console.log('🔧 加载 Changeset 模块...');
     const { makeAText, applyToAText } = Changeset;
@@ -202,11 +137,11 @@ const padId = process.argv[2];
         // 执行数据库插入/更新操作 (UPSERT)
         let existingRecord = null;
         let isUpdate = false;
-        
+
         try {
           // 1. 检查 key-value 存储中的记录
           existingRecord = await db.get(`pad_version_content:${padId}:${rev}`);
-          
+
           if (existingRecord) {
             // 更新 key-value 存储
             await db.set(`pad_version_content:${padId}:${rev}`, {
@@ -238,7 +173,7 @@ const padId = process.argv[2];
           // 2. 插入/更新 MySQL 表
           try {
             await mysqlConnection.execute(`
-              INSERT INTO pad_version_contents 
+              INSERT INTO pad_version_contents
               (pad_id, revision, content, author_id, timestamp)
               VALUES (?, ?, ?, ?, ?)
               ON DUPLICATE KEY UPDATE
@@ -333,7 +268,7 @@ const padId = process.argv[2];
         );
         console.log(`\n📊 MySQL 表验证:`);
         console.log(`  - pad_version_contents 表中 ${padId} 的记录数: ${countResult[0].count}`);
-        
+
         // 检查最后几个版本
         const [lastVersions] = await mysqlConnection.execute(
           'SELECT revision FROM pad_version_contents WHERE pad_id = ? AND revision >= ? ORDER BY revision',
@@ -341,7 +276,7 @@ const padId = process.argv[2];
         );
         const foundVersions = lastVersions.map(row => row.revision);
         console.log(`  - 最后几个版本: ${foundVersions.join(', ')}`);
-        
+
         if (foundVersions.includes(headRevision)) {
           console.log(`  ✓ 最新版本 ${headRevision} 已成功存储到 MySQL 表`);
         } else {
@@ -365,14 +300,14 @@ const padId = process.argv[2];
         console.error('MySQL 连接关闭失败:', closeError.message);
       }
     }
-    
+
     try {
       await db.shutdown();
       console.log('🔌 Etherpad 数据库连接已关闭');
     } catch (closeError) {
       console.error('Etherpad 数据库关闭失败:', closeError.message);
     }
-    
+
     console.log('\n🎉 Pad 版本内容重建完成！');
   }
 })();
