@@ -29,9 +29,8 @@ if (process.argv.length !== 3) {
   console.log('功能说明:');
   console.log('  - 直接调用 Etherpad 的 Changeset 核心函数');
   console.log('  - 模拟 timeslider 的版本重建过程');
-  console.log('  - 从 store 表读取数据，逐步应用 changeset');
-  console.log('  - 将重建的版本内容插入/更新到 pad_version_contents 表');
-  console.log('  - 对相同 pad_id 和 revision 执行更新操作');
+  console.log('  - 从 store 表读取 changeset，逐步应用生成完整文本');
+  console.log('  - 将重建的版本内容插入/更新到 MySQL pad_version_contents 表');
   process.exit(1);
 }
 
@@ -134,72 +133,42 @@ const padId = process.argv[2];
           change_summary: `${oldText.length} -> ${newText.length} chars`
         };
 
-        // 执行数据库插入/更新操作 (UPSERT)
-        let existingRecord = null;
+        // 执行数据库插入/更新操作 - 只插入到 MySQL 表
         let isUpdate = false;
 
         try {
-          // 1. 检查 key-value 存储中的记录
-          existingRecord = await db.get(`pad_version_content:${padId}:${rev}`);
+          // 检查 MySQL 表中是否已存在该记录
+          const [existingRows] = await mysqlConnection.execute(
+            'SELECT revision FROM pad_version_contents WHERE pad_id = ? AND revision = ?',
+            [padId, rev]
+          );
+          isUpdate = existingRows.length > 0;
 
-          if (existingRecord) {
-            // 更新 key-value 存储
-            await db.set(`pad_version_content:${padId}:${rev}`, {
-              pad_id: record.pad_id,
-              revision: record.revision,
-              content: record.content,
-              author: record.author,
-              timestamp: record.timestamp,
-              changeset: record.changeset,
-              attribs: record.attribs,
-              updated_at: Date.now()
-            });
-            isUpdate = true;
+          // 插入/更新 MySQL 表
+          await mysqlConnection.execute(`
+            INSERT INTO pad_version_contents
+            (pad_id, revision, content, author_id, timestamp)
+            VALUES (?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+            content = VALUES(content),
+            author_id = VALUES(author_id),
+            timestamp = VALUES(timestamp)
+          `, [
+            record.pad_id,
+            record.revision,
+            record.content,
+            record.author,  // 使用 author 作为 author_id
+            record.timestamp
+          ]);
+
+          if (isUpdate) {
+            updateCount++;
           } else {
-            // 插入 key-value 存储
-            await db.set(`pad_version_content:${padId}:${rev}`, {
-              pad_id: record.pad_id,
-              revision: record.revision,
-              content: record.content,
-              author: record.author,
-              timestamp: record.timestamp,
-              changeset: record.changeset,
-              attribs: record.attribs,
-              created_at: Date.now()
-            });
-            isUpdate = false;
-          }
-
-          // 2. 插入/更新 MySQL 表
-          try {
-            await mysqlConnection.execute(`
-              INSERT INTO pad_version_contents
-              (pad_id, revision, content, author_id, timestamp)
-              VALUES (?, ?, ?, ?, ?)
-              ON DUPLICATE KEY UPDATE
-              content = VALUES(content),
-              author_id = VALUES(author_id),
-              timestamp = VALUES(timestamp)
-            `, [
-              record.pad_id,
-              record.revision,
-              record.content,
-              record.author,  // 使用 author 作为 author_id
-              record.timestamp
-            ]);
-
-            if (isUpdate) {
-              updateCount++;
-            } else {
-              insertCount++;
-            }
-          } catch (mysqlError) {
-            console.error(`  ⚠️  Rev ${rev}: MySQL 插入失败 - ${mysqlError.message}`);
-            // 继续处理，不中断整个流程
+            insertCount++;
           }
 
         } catch (dbError) {
-          console.error(`  ✗ Rev ${rev}: 数据库操作失败 - ${dbError.message}`);
+          console.error(`  ✗ Rev ${rev}: MySQL 操作失败 - ${dbError.message}`);
           errorCount++;
           continue;
         }
@@ -257,7 +226,7 @@ const padId = process.argv[2];
     if (errorCount > 0) {
       console.log(`⚠️  处理失败 ${errorCount} 个版本`);
     }
-    console.log(`\n数据存储位置: pad_version_content:${padId}:0 到 pad_version_content:${padId}:${headRevision}`);
+    console.log(`\n数据存储位置: MySQL 表 pad_version_contents`);
 
     // 验证 MySQL 表中的数据
     if (mysqlConnection) {

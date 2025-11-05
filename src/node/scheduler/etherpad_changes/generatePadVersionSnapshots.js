@@ -111,6 +111,28 @@ class TextDiffCalculator {
 class DocumentSegmentManager {
   constructor() {
     this.segments = [];  // 文档片段数组
+    this.sentenceSplitter = null;  // 句子分割器实例
+  }
+
+  /**
+   * 初始化句子分割器
+   */
+  initSentenceSplitter() {
+    if (!this.sentenceSplitter) {
+      const SentenceSplitter = require('./SentenceSplitter');
+      this.sentenceSplitter = new SentenceSplitter();
+      this.sentenceSplitter.init();
+    }
+  }
+
+  /**
+   * 清理句子分割器资源
+   */
+  cleanupSentenceSplitter() {
+    if (this.sentenceSplitter) {
+      this.sentenceSplitter.close();
+      this.sentenceSplitter = null;
+    }
   }
 
   /**
@@ -567,9 +589,13 @@ class DocumentSegmentManager {
   /**
    * 合并连续的相同操作
    * 只合并 behavior 和 author 都相同的连续操作
+   * 增加句子级别约束：如果合并后内容包含多句话，则不合并
    */
-  mergeOperations(history) {
+  async mergeOperations(history) {
     if (history.length === 0) return [];
+    
+    // 初始化句子分割器
+    this.initSentenceSplitter();
     
     const merged = [];
     let current = { ...history[0] };
@@ -577,15 +603,40 @@ class DocumentSegmentManager {
     for (let i = 1; i < history.length; i++) {
       const next = history[i];
       
-      // 如果 behavior 和 author 都相同，合并
+      // 如果 behavior 和 author 都相同，尝试合并
       if (current.behavior === next.behavior && 
           current.author === next.author) {
-        // 拼接内容
-        current.content += next.content;
-        // 更新 end_time 为最新的
-        current.end_time = next.end_time;
+        
+        // 尝试合并内容
+        const mergedContent = current.content + next.content;
+        
+        try {
+          // 使用 NLTK 检查句子数量
+          const sentenceCount = await this.sentenceSplitter.countSentences(mergedContent);
+          
+          debugLog(`[Merge Check] Content: "${mergedContent.substring(0, 50)}...", Sentences: ${sentenceCount}`);
+          
+          // 只有在合并后仍是单句（或无句）时才允许合并
+          if (sentenceCount <= 1) {
+            // 拼接内容
+            current.content = mergedContent;
+            // 更新 end_time 为最新的
+            current.end_time = next.end_time;
+            debugLog(`[Merge Success] Merged operation, total length: ${mergedContent.length}`);
+          } else {
+            // 句子数量 >= 2，不合并
+            debugLog(`[Merge Skip] Content would create ${sentenceCount} sentences, keeping separate`);
+            merged.push(current);
+            current = { ...next };
+          }
+        } catch (error) {
+          console.error(`[Sentence Count Error] ${error.message}, defaulting to no merge`);
+          // 出错时默认不合并，保持安全
+          merged.push(current);
+          current = { ...next };
+        }
       } else {
-        // 不同，保存当前的，开始新的
+        // behavior 或 author 不同，保存当前的，开始新的
         merged.push(current);
         current = { ...next };
       }
@@ -632,12 +683,12 @@ class SnapshotBuilderV3 {
   }
 
   /**
-   * 获取当前快照
+   * 获取当前快照（异步）
    */
-  getSnapshot() {
+  async getSnapshot() {
     // 构建操作历史
     const rawHistory = this.docManager.buildOperationHistory();
-    const mergedHistory = this.docManager.mergeOperations(rawHistory);
+    const mergedHistory = await this.docManager.mergeOperations(rawHistory);
     
     return {
       snapshot: this.docManager.renderSnapshot(),
@@ -843,7 +894,7 @@ class PadSnapshotGeneratorV3 {
       
       this.snapshotBuilder.initialize(firstContent, firstAuthorId, firstTimestamp);
       
-      const firstSnapshot = this.snapshotBuilder.getSnapshot();
+      const firstSnapshot = await this.snapshotBuilder.getSnapshot();
       
       // 验证第一个版本
       const firstValidation = this.snapshotBuilder.validateSnapshot(firstContent);
@@ -880,7 +931,7 @@ class PadSnapshotGeneratorV3 {
           currVersion.timestamp || Date.now()
         );
 
-        const result = this.snapshotBuilder.getSnapshot();
+        const result = await this.snapshotBuilder.getSnapshot();
         
         // 验证快照
         const validation = this.snapshotBuilder.validateSnapshot(currVersion.content || '');
@@ -909,6 +960,10 @@ class PadSnapshotGeneratorV3 {
       }
 
       console.log('\n✅ 快照构建完成\n');
+      
+      // 清理句子分割器资源
+      console.log('🧹 清理句子分割器资源...');
+      this.snapshotBuilder.docManager.cleanupSentenceSplitter();
 
       await this.db.insertSnapshots(snapshots);
 

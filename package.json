@@ -34,7 +34,9 @@
     "makeDocs": "pnpm --filter bin run makeDocs"
   },
   "dependencies": {
-    "ep_etherpad-lite": "workspace:./src"
+    "diff-match-patch": "^1.0.5",
+    "ep_etherpad-lite": "workspace:./src",
+    "python-shell": "^5.0.0"
   },
   "devDependencies": {
     "admin": "workspace:./admin",

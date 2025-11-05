@@ -12,8 +12,10 @@ A comprehensive toolkit for Etherpad version tracking, diff calculation, and cha
 |--------|----------|----------|--------------|
 | `PadContentRebuild.js` | Rebuild pad content from store | `src/` directory | Etherpad modules |
 | `PadContentMerge.js` | Merge consecutive edits | Any | settings.json |
-| `generatePadVersionSnapshotsV3.js` | Generate version snapshots | Any | pad_version_contents_merge |
+| `generatePadVersionSnapshots.js` | Generate version snapshots with NLTK | Any | pad_version_contents_merge, Python 3, NLTK |
 | `exportToChangesTable.js` | Export to changes table | Any | pad_version_snapshots |
+| `SentenceSplitter.js` | Node.js wrapper for Python NLTK | N/A (library) | python-shell, sentence_splitter.py |
+| `sentence_splitter.py` | Python NLTK sentence tokenizer | N/A (library) | NLTK |
 
 ### 1. `PadContentRebuild.js`
 Rebuilds complete pad content from Etherpad's internal `store:*` data.
@@ -27,23 +29,58 @@ Merges consecutive edits by the same author within short time windows.
 - Reduces version fragmentation
 - Improves processing performance
 
-### 3. `generatePadVersionSnapshotsV3.js` ⭐
-Core snapshot generation script using `diff-match-patch` algorithm.
+### 3. `generatePadVersionSnapshots.js` ⭐ (NEW)
+Core snapshot generation script using `diff-match-patch` algorithm with **NLTK sentence-level merge**.
 - Creates `pad_version_snapshots` table
 - Tracks complete operation history (JSON format)
 - Records author and timestamp for each add/delete operation
+- **Sentence-level merge constraint**: Only merges operations if result is a single sentence
 
 **Key Features:**
 - ✅ Accurate text diff calculation
 - ✅ Document segment management (normal + deleted)
 - ✅ Operation history tracking (add/deleted)
 - ✅ Hong Kong Time format (UTC+8)
-- ✅ Automatic consecutive operation merging
+- ✅ **NLTK-based sentence detection for smart merging**
+- ✅ Python-Node.js integration via `python-shell`
 
-### 4. `generatePadChanges.js`
+**Merge Logic:**
+When consecutive operations have the same `behavior` and `author`, the system attempts to merge them. However, if the merged content would create **2 or more sentences** (detected by NLTK), the operations are kept separate. This ensures each operation record represents a sentence-level edit.
+
+**Example:**
+```
+Operation 1: "Hello world"        (1 sentence)
+Operation 2: ". How are you?"     (would create 2 sentences)
+Result: NOT merged (kept as separate operations)
+
+Operation 1: "Hello"              (1 sentence)
+Operation 2: " world"             (still 1 sentence)
+Result: MERGED to "Hello world"
+```
+
+### 4. `SentenceSplitter.js` & `sentence_splitter.py`
+**New library components** for NLTK integration:
+- `SentenceSplitter.js`: Node.js wrapper class that communicates with Python
+- `sentence_splitter.py`: Python script using NLTK for sentence tokenization
+- Supports English, Chinese, and mixed-language text
+- Persistent Python process for performance
+
+**API:**
+```javascript
+const SentenceSplitter = require('./SentenceSplitter');
+const splitter = new SentenceSplitter();
+
+// Count sentences in text
+const count = await splitter.countSentences("Hello world. How are you?");
+console.log(count); // 2
+
+splitter.close(); // Clean up
+```
+
+### 5. `generatePadChanges.js`
 Generates specific changes between versions from snapshot data.
 
-### 5. `exportToChangesTable.js`
+### 6. `exportToChangesTable.js`
 Exports operation history to structured change records.
 - Parses `pad_version_snapshots.deletions_json`
 - Creates `pad_version_changes` table
@@ -80,7 +117,7 @@ pad_version_contents
     ↓
 pad_version_contents_merge
     ↓
-[generatePadVersionSnapshotsV3.js]
+[generatePadVersionSnapshots.js] ← Uses NLTK (sentence_splitter.py)
     ↓
 pad_version_snapshots (with deletions_json)
     ↓
@@ -93,6 +130,31 @@ pad_version_changes
 
 ## 🚀 Quick Start
 
+### Prerequisites
+
+Before running the scripts, ensure your environment is properly configured:
+
+1. **Python 3.7+** with NLTK installed
+2. **Node.js 14+** with required packages
+3. **MySQL 5.7+** database accessible
+
+**📖 For detailed setup instructions, see [ENVIRONMENT_SETUP.md](./ENVIRONMENT_SETUP.md)**
+
+Quick setup:
+```bash
+# Install Python dependencies
+pip3 install -r requirements.txt
+python3 -c "import nltk; nltk.download('punkt')"
+
+# Install Node.js dependencies
+cd d:\ALIC\alic-etherpad-lite
+pnpm add python-shell diff-match-patch
+
+# Test NLTK integration
+cd src/node/scheduler/etherpad_changes
+node test-sentence-splitter.js
+```
+
 ### Option 1: Full Pipeline (First Run)
 
 ```bash
@@ -104,11 +166,21 @@ node --require tsx/cjs node/scheduler/etherpad_changes/PadContentRebuild.js room
 cd node/scheduler/etherpad_changes
 node PadContentMerge.js room-229
 
-# Step 3: Generate version snapshots
-node generatePadVersionSnapshotsV3.js room-229
+# Step 3: Generate version snapshots (with NLTK sentence-level merge)
+node generatePadVersionSnapshots.js room-229
 
 # Step 4: Export to changes table
 node exportToChangesTable.js room-229
+
+# 1. 生成快照
+cd d:\ALIC\alic-etherpad-lite\src\node\scheduler\etherpad_changes
+node generatePadVersionSnapshots.js room-229
+
+# 2. 导出到 changes 表
+node exportToChangesTable.js room-229
+
+# 3. 查询结果（使用提供的 SQL）
+
 ```
 
 ### Option 2: Update Only (Existing Data)
@@ -116,11 +188,19 @@ node exportToChangesTable.js room-229
 ```bash
 cd d:\ALIC\alic-etherpad-lite\src\node\scheduler\etherpad_changes
 
-# Regenerate snapshots
-node generatePadVersionSnapshotsV3.js room-229
+# Regenerate snapshots (with NLTK)
+node generatePadVersionSnapshots.js room-229
 
 # Update changes table
 node exportToChangesTable.js room-229
+```
+
+### Option 3: Test NLTK Integration
+
+```bash
+# Test sentence splitter
+cd d:\ALIC\alic-etherpad-lite\src\node\scheduler\etherpad_changes
+node test-sentence-splitter.js
 ```
 
 ---
@@ -134,10 +214,10 @@ SET SESSION group_concat_max_len = 10485760;  -- 10MB
 
 ### Query Full Text (with deletion markers)
 ```sql
-SELECT 
+SELECT
     pad_id,
     GROUP_CONCAT(
-        CASE 
+        CASE
             WHEN behavior = 'add' THEN content
             WHEN behavior = 'deleted' THEN CONCAT('[deleted:', content, ']')
         END
@@ -151,7 +231,7 @@ GROUP BY pad_id;
 
 ### Query Pure Text (no deletion markers)
 ```sql
-SELECT 
+SELECT
     pad_id,
     GROUP_CONCAT(
         content
@@ -159,7 +239,7 @@ SELECT
         SEPARATOR ''
     ) AS pure_text
 FROM pad_version_changes
-WHERE pad_id = 'room-229' 
+WHERE pad_id = 'room-229'
   AND behavior = 'add'
 GROUP BY pad_id;
 ```
