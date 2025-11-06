@@ -1,15 +1,28 @@
 #!/usr/bin/env node
 
 /**
- * Pad 版本快照生成器 V3 - 修复版
+ * Pad 版本快照生成器 - 优化版
  * 
- * 核心改进：
+ * 核心改进 V4：
  * 1. 使用 google-diff-match-patch 库进行精确的文本差异计算
  * 2. 增加快照验证机制，确保删除标记后与当前版本一致
  * 3. 添加详细的调试日志
  * 4. 改进文档片段管理逻辑
+ * 5. 集成 NLTK 句子级别合并判断
+ * 6. ✅ 统一合并逻辑：移除片段级合并，只在构建操作历史时合并一次
+ * 7. ✅ 逐步合并策略：边遍历边判断，不丢失可合并的片段
+ * 8. ✅ 保留完整时间信息：记录每个操作的 start_time 和 end_time
  * 
- * 使用方法: node generatePadVersionSnapshotsV3.js <padId> [--debug]
+ * 合并策略：
+ * - 合并条件：behavior 相同 + author 相同 + 时间间隔 ≤ 1小时 + 合并后仍是单句话
+ * - 逐步判断：每次只尝试合并相邻的两个操作，避免跨句子合并
+ * - 时间保留：合并时保留第一个操作的 start_time 和最后一个操作的 end_time
+ * 
+ * 数据流向：
+ * - 数据源：pad_version_contents (未合并的原始版本数据)
+ * - 目标表：pad_version_snapshots_compare (用于对比分析)
+ * 
+ * 使用方法: node generatePadVersionSnapshots.js <padId> [--debug]
  */
 
 const mysql = require('mysql2/promise');
@@ -193,8 +206,8 @@ class DocumentSegmentManager {
       cumulativeInsertOffset += op.content.length;
     }
     
-    // 合并相邻的同类型片段
-    this._mergeAdjacentSegments();
+    // ✅ 移除片段级合并，只在构建操作历史时合并
+    // this._mergeAdjacentSegments();
     
     debugLog(`片段数量: ${this.segments.length}`);
   }
@@ -437,34 +450,12 @@ class DocumentSegmentManager {
   }
 
   /**
-   * 合并相邻的同类型片段
+   * ❌ 已废弃：移除片段级合并，改为在构建操作历史时合并
+   * 保留此函数仅作为参考，不再使用
    */
-  _mergeAdjacentSegments() {
-    if (this.segments.length <= 1) return;
-    
-    const merged = [this.segments[0]];
-    
-    for (let i = 1; i < this.segments.length; i++) {
-      const prev = merged[merged.length - 1];
-      const curr = this.segments[i];
-      
-      // 合并条件：类型相同，版本相同
-      if (prev.type === curr.type && 
-          prev.type === 'normal' && 
-          prev.version === curr.version) {
-        prev.content += curr.content;
-        debugLog(`    合并片段: ${i-1} 和 ${i}`);
-      } else if (prev.type === curr.type && 
-                 prev.type === 'deleted' && 
-                 prev.deletedAt === curr.deletedAt) {
-        prev.content += curr.content;
-        debugLog(`    合并删除片段: ${i-1} 和 ${i}`);
-      } else {
-        merged.push(curr);
-      }
-    }
-    
-    this.segments = merged;
+  _mergeAdjacentSegments_DEPRECATED() {
+    // 此函数已被 buildAndMergeOperationHistory() 替代
+    console.warn('⚠️ _mergeAdjacentSegments 已废弃，请使用 buildAndMergeOperationHistory');
   }
 
   /**
@@ -556,96 +547,146 @@ class DocumentSegmentManager {
   }
 
   /**
-   * 构建操作历史数组
+   * 构建操作历史并智能合并（一步完成）
+   * 
+   * 合并条件：
+   * 1. behavior 相同（都是 add 或 deleted）
+   * 2. author 相同
+   * 3. 时间间隔 ≤ 1小时（3600秒 = 3600000毫秒）
+   * 4. 合并后仍是单句话（≤ 1句）
+   * 
+   * 采用逐步合并策略：
+   * - 每次只尝试合并当前操作和下一个操作
+   * - 如果可以合并，继续尝试下一个
+   * - 如果不能合并，保存当前操作，开始新的合并
+   * - 这样可以保留完整的时间信息，不会丢失可合并的片段
    */
-  buildOperationHistory() {
-    const history = [];
-    
-    for (const segment of this.segments) {
-      if (segment.type === 'normal') {
-        // 添加操作
-        history.push({
-          behavior: 'add',
-          author: segment.author || '',
-          start_time: this.formatHKTime(segment.timestamp),
-          end_time: this.formatHKTime(segment.timestamp),
-          content: segment.content
-        });
-      } else if (segment.type === 'deleted') {
-        // 删除操作
-        history.push({
-          behavior: 'deleted',
-          author: segment.deletedAuthor || segment.author || '',
-          start_time: this.formatHKTime(segment.timestamp),
-          end_time: this.formatHKTime(segment.deletedTimestamp),
-          content: segment.content
-        });
-      }
-    }
-    
-    return history;
-  }
-
-  /**
-   * 合并连续的相同操作
-   * 只合并 behavior 和 author 都相同的连续操作
-   * 增加句子级别约束：如果合并后内容包含多句话，则不合并
-   */
-  async mergeOperations(history) {
-    if (history.length === 0) return [];
+  async buildAndMergeOperationHistory() {
+    if (this.segments.length === 0) return [];
     
     // 初始化句子分割器
     this.initSentenceSplitter();
     
-    const merged = [];
-    let current = { ...history[0] };
+    const TIME_THRESHOLD = 3600000;  // 1小时 = 3600秒 = 3600000毫秒
+    const mergedHistory = [];
+    let current = null;
     
-    for (let i = 1; i < history.length; i++) {
-      const next = history[i];
+    for (const segment of this.segments) {
+      // 1. 构建当前片段的操作对象
+      let operation = null;
       
-      // 如果 behavior 和 author 都相同，尝试合并
-      if (current.behavior === next.behavior && 
-          current.author === next.author) {
-        
-        // 尝试合并内容
-        const mergedContent = current.content + next.content;
-        
-        try {
-          // 使用 NLTK 检查句子数量
-          const sentenceCount = await this.sentenceSplitter.countSentences(mergedContent);
-          
-          debugLog(`[Merge Check] Content: "${mergedContent.substring(0, 50)}...", Sentences: ${sentenceCount}`);
-          
-          // 只有在合并后仍是单句（或无句）时才允许合并
-          if (sentenceCount <= 1) {
-            // 拼接内容
-            current.content = mergedContent;
-            // 更新 end_time 为最新的
-            current.end_time = next.end_time;
-            debugLog(`[Merge Success] Merged operation, total length: ${mergedContent.length}`);
-          } else {
-            // 句子数量 >= 2，不合并
-            debugLog(`[Merge Skip] Content would create ${sentenceCount} sentences, keeping separate`);
-            merged.push(current);
-            current = { ...next };
-          }
-        } catch (error) {
-          console.error(`[Sentence Count Error] ${error.message}, defaulting to no merge`);
-          // 出错时默认不合并，保持安全
-          merged.push(current);
-          current = { ...next };
+      if (segment.type === 'normal') {
+        operation = {
+          behavior: 'add',
+          author: segment.author || '',
+          start_time: this.formatHKTime(segment.timestamp),
+          end_time: this.formatHKTime(segment.timestamp),
+          start_timestamp: segment.timestamp,  // 保留原始时间戳用于计算
+          end_timestamp: segment.timestamp,
+          content: segment.content
+        };
+      } else if (segment.type === 'deleted') {
+        operation = {
+          behavior: 'deleted',
+          author: segment.deletedAuthor || segment.author || '',
+          start_time: this.formatHKTime(segment.timestamp),
+          end_time: this.formatHKTime(segment.deletedTimestamp),
+          start_timestamp: segment.timestamp,
+          end_timestamp: segment.deletedTimestamp,
+          content: segment.content
+        };
+      }
+      
+      if (!operation) continue;
+      
+      // 2. 如果是第一个操作，直接设为 current
+      if (!current) {
+        current = operation;
+        continue;
+      }
+      
+      // 3. 检查基本合并条件
+      const timeGap = operation.start_timestamp - current.end_timestamp;
+      const canMergeBasic = (
+        current.behavior === operation.behavior && 
+        current.author === operation.author &&
+        timeGap >= 0 && 
+        timeGap <= TIME_THRESHOLD
+      );
+      
+      if (!canMergeBasic) {
+        // 基本条件不满足，不合并
+        if (timeGap > TIME_THRESHOLD) {
+          debugLog(`[Skip] Time gap too large: ${(timeGap / 1000 / 60).toFixed(1)} minutes`);
+        } else {
+          debugLog(`[Skip] Different behavior or author`);
         }
-      } else {
-        // behavior 或 author 不同，保存当前的，开始新的
-        merged.push(current);
-        current = { ...next };
+        mergedHistory.push(this._cleanupOperation(current));
+        current = operation;
+        continue;
+      }
+      
+      // 4. 基本条件满足，检查句子级别约束
+      const mergedContent = current.content + operation.content;
+      
+      try {
+        const sentenceCount = await this.sentenceSplitter.countSentences(mergedContent);
+        
+        debugLog(`[Merge Check] Content: "${mergedContent.substring(0, 50)}...", Sentences: ${sentenceCount}, Time gap: ${(timeGap / 1000).toFixed(1)}s`);
+        
+        if (sentenceCount <= 1) {
+          // ✅ 可以合并：仍然是单句话
+          current.content = mergedContent;
+          current.end_time = operation.end_time;
+          current.end_timestamp = operation.end_timestamp;
+          debugLog(`[Merge Success] Merged, total length: ${mergedContent.length}`);
+          continue;  // 继续尝试合并下一个片段
+        } else {
+          // ❌ 不能合并：会变成多句话
+          debugLog(`[Merge Skip] Would create ${sentenceCount} sentences, keeping separate`);
+          mergedHistory.push(this._cleanupOperation(current));
+          current = operation;
+        }
+      } catch (error) {
+        // 句子分割器出错，保守处理：不合并
+        console.error(`[Sentence Count Error] ${error.message}, defaulting to no merge`);
+        mergedHistory.push(this._cleanupOperation(current));
+        current = operation;
       }
     }
     
-    // 添加最后一个
-    merged.push(current);
+    // 5. 添加最后一个操作
+    if (current) {
+      mergedHistory.push(this._cleanupOperation(current));
+    }
     
-    return merged;
+    return mergedHistory;
+  }
+
+  /**
+   * 清理操作对象（移除内部使用的时间戳字段）
+   */
+  _cleanupOperation(operation) {
+    const { start_timestamp, end_timestamp, ...cleaned } = operation;
+    return cleaned;
+  }
+
+  /**
+   * ❌ 已废弃：旧的两步式合并方法
+   * 保留仅作为参考
+   */
+  buildOperationHistory_DEPRECATED() {
+    console.warn('⚠️ buildOperationHistory 已废弃，请使用 buildAndMergeOperationHistory');
+    return [];
+  }
+
+  /**
+   * ❌ 已废弃：旧的两步式合并方法
+   * 保留仅作为参考
+   */
+  async mergeOperations_DEPRECATED(history) {
+    console.warn('⚠️ mergeOperations 已废弃，请使用 buildAndMergeOperationHistory');
+    return history;
   }
 }
 
@@ -686,15 +727,14 @@ class SnapshotBuilderV3 {
    * 获取当前快照（异步）
    */
   async getSnapshot() {
-    // 构建操作历史
-    const rawHistory = this.docManager.buildOperationHistory();
-    const mergedHistory = await this.docManager.mergeOperations(rawHistory);
+    // ✅ 一步完成：构建并合并操作历史
+    const mergedHistory = await this.docManager.buildAndMergeOperationHistory();
     
     return {
       snapshot: this.docManager.renderSnapshot(),
       pureText: this.docManager.extractPureText(),
       deletions: this.docManager.getDeletions(),
-      operationHistory: mergedHistory,  // 新增：操作历史数组
+      operationHistory: mergedHistory,  // 操作历史数组（已合并）
       debugInfo: this.docManager.getDebugInfo()
     };
   }
@@ -760,7 +800,7 @@ class DatabaseManager {
 
   async createSnapshotTable() {
     const createTableSQL = `
-      CREATE TABLE IF NOT EXISTS pad_version_snapshots (
+      CREATE TABLE IF NOT EXISTS pad_version_snapshots_compare (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
         pad_id VARCHAR(255) NOT NULL,
         revision INT NOT NULL,
@@ -779,13 +819,13 @@ class DatabaseManager {
     `;
 
     await this.connection.execute(createTableSQL);
-    console.log('✅ 快照表检查/创建完成');
+    console.log('✅ 快照对比表检查/创建完成（pad_version_snapshots_compare）');
   }
 
   async getPadVersions(padId) {
     const query = `
       SELECT pad_id, revision, content, author_id, timestamp
-      FROM pad_version_contents_merge
+      FROM pad_version_contents
       WHERE pad_id = ?
       ORDER BY revision ASC
     `;
@@ -796,15 +836,15 @@ class DatabaseManager {
 
   async clearPadSnapshots(padId) {
     await this.connection.execute(
-      'DELETE FROM pad_version_snapshots WHERE pad_id = ?',
+      'DELETE FROM pad_version_snapshots_compare WHERE pad_id = ?',
       [padId]
     );
-    console.log('🗑️  清理旧的快照数据');
+    console.log('🗑️  清理旧的快照对比数据');
   }
 
   async insertSnapshot(snapshot) {
     const query = `
-      INSERT INTO pad_version_snapshots 
+      INSERT INTO pad_version_snapshots_compare 
       (pad_id, revision, snapshot_text, pure_text, author_id, timestamp, deletion_count, deletions_json)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `;
@@ -870,7 +910,7 @@ class PadSnapshotGeneratorV3 {
       console.log('🔧 检查/创建快照表...');
       await this.db.createSnapshotTable();
 
-      console.log(`\n📖 从 pad_version_contents_merge 读取版本数据...`);
+      console.log(`\n📖 从 pad_version_contents 读取版本数据（对比模式）...`);
       const versions = await this.db.getPadVersions(padId);
       
       if (versions.length === 0) {
@@ -960,10 +1000,6 @@ class PadSnapshotGeneratorV3 {
       }
 
       console.log('\n✅ 快照构建完成\n');
-      
-      // 清理句子分割器资源
-      console.log('🧹 清理句子分割器资源...');
-      this.snapshotBuilder.docManager.cleanupSentenceSplitter();
 
       await this.db.insertSnapshots(snapshots);
 
