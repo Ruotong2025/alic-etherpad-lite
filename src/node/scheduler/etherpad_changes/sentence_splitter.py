@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NLTK 句子分割器
+句子分割器（基于 jieba 和 NLTK）
 用于判断文本中的句子数量，支持中英文混合文本
 """
 
@@ -9,6 +9,18 @@ import sys
 import json
 import nltk
 import os
+import logging
+import io
+
+# 设置标准输入输出的编码为 UTF-8
+if sys.platform == 'win32':
+    sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
+# 先导入 jieba，然后禁用日志
+import jieba
+jieba.setLogLevel(logging.ERROR)
 
 # 确保 NLTK 数据已下载
 def ensure_nltk_data():
@@ -39,9 +51,46 @@ def ensure_nltk_data():
     # 如果所有尝试都失败，记录错误
     print(json.dumps({'error': 'Failed to download any NLTK tokenizer data'}), file=sys.stderr, flush=True)
 
+def split_sentences_with_jieba(text):
+    """
+    使用 jieba 分词后进行句子分割
+    
+    改进逻辑：
+    1. 将中文标点替换为英文标点（让 NLTK 能识别）
+    2. 使用 jieba.lcut 进行分词
+    3. 连接为字符串（词之间加空格）
+    4. 使用 NLTK 的 sent_tokenize 进行句子分割
+    
+    Args:
+        text (str): 要分析的文本
+    
+    Returns:
+        list: 句子列表
+    """
+    if not text or not text.strip():
+        return []
+    
+    # 将中文标点替换为英文标点，让 NLTK 能正确识别句子边界
+    text_converted = text
+    text_converted = text_converted.replace('。', '.')
+    text_converted = text_converted.replace('！', '!')
+    text_converted = text_converted.replace('？', '?')
+    text_converted = text_converted.replace('；', ';')
+    
+    # 使用 jieba 进行分词
+    seg_list = jieba.lcut(text_converted)
+    
+    # 连接为字符串（在词之间加空格）
+    seg_text = " ".join(seg_list)
+    
+    # 使用 NLTK 的 sent_tokenize 进行句子分割
+    sentences = nltk.tokenize.sent_tokenize(seg_text)
+    
+    return sentences
+
 def count_sentences_enhanced(text):
     """
-    增强版分句：先使用中文标点分句，再用 NLTK 验证
+    增强版分句：使用 jieba + NLTK 进行分句
     
     Args:
         text (str): 要分析的文本
@@ -54,26 +103,15 @@ def count_sentences_enhanced(text):
     if not text or not text.strip():
         return 0
     
-    # 方法1：基于中文标点的快速分句
-    # 中文句子结束符：。！？；\n
-    chinese_sentence_pattern = r'[。！？；\n]+'
-    chinese_sentences = re.split(chinese_sentence_pattern, text.strip())
-    chinese_sentences = [s.strip() for s in chinese_sentences if s.strip()]
-    
-    # 如果包含中文字符且中文分句结果 > 1，使用中文分句结果
-    if re.search(r'[\u4e00-\u9fff]', text) and len(chinese_sentences) > 1:
-        return len(chinese_sentences)
-    
-    # 方法2：使用 NLTK（主要用于英文）
+    # 使用 jieba + NLTK 分句
     try:
-        sentences = nltk.sent_tokenize(text.strip())
+        sentences = split_sentences_with_jieba(text)
         non_empty_sentences = [s for s in sentences if s.strip()]
-        
-        # 返回两种方法中较大的值（更保守）
-        return max(len(non_empty_sentences), len(chinese_sentences))
+        return len(non_empty_sentences)
     except Exception as e:
-        # NLTK 失败时，回退到中文分句结果
-        return len(chinese_sentences) if chinese_sentences else 1
+        # 如果 jieba 失败，回退到简单计数
+        # 至少返回 1（表示有内容）
+        return 1
 
 def count_sentences(text):
     """
