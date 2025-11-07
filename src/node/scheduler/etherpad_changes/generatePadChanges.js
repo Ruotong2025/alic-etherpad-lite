@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Pad 版本变更记录生成器 - 整合版
+ * Pad 版本变更记录生成器 - 整合版（对比分析用）
  * 
  * 功能：
  * 1. 使用 google-diff-match-patch 进行精确的文本差异计算
@@ -11,13 +11,20 @@
  * 5. 一步完成，消除冗余
  * 
  * 合并策略：
- * - 合并条件：behavior 相同 + author 相同 + 时间间隔 ≤ 1小时 + 合并后仍是单句话
+ * - 合并条件：behavior 相同 + author 相同 + 时间间隔 ≤ 10分钟 + 合并后仍是单句话
+ * - 时间计算：下一个操作的 start_time - 当前操作的 end_time ≤ 10分钟
+ * - 时间重叠：允许负值（操作时间重叠，如用户连续选中多段文本后一次性删除）
  * - 逐步判断：每次只尝试合并相邻的两个操作，避免跨句子合并
  * - 时间保留：合并时保留第一个操作的 start_time 和最后一个操作的 end_time
  * 
  * 数据流向：
  * - 数据源：pad_version_contents (原始版本数据)
  * - 目标表：pad_version_changes_compare (变更记录表，对比分析用)
+ * 
+ * 对比说明：
+ * - pad_version_changes: 使用 generatePadVersionSnapshots.js + exportToChangesTable.js
+ * - pad_version_changes_compare: 使用本脚本（一步完成）
+ * - 两者应该产生相同的结果
  * 
  * 使用方法: node generatePadChanges.js <padId> [--debug]
  */
@@ -167,40 +174,83 @@ class DocumentSegmentManager {
     debugLog(`片段数量: ${this.segments.length}`);
   }
 
+  /**
+   * 应用删除操作
+   * 
+   * 关键：删除操作从指定位置开始，持续删除指定长度的字符
+   * - position: 在 normal 文本中的起始位置（不包括 deleted 片段）
+   * - length: 要删除的字符数
+   * 
+   * 算法：
+   * 1. 遍历所有 normal 片段
+   * 2. 找到删除范围[position, position+length)覆盖的所有片段
+   * 3. 对每个片段进行相应的删除或分割操作
+   */
   _applyDeletion(position, length, version, authorId, timestamp) {
-    debugLog(`  执行删除: 位置=${position}, 长度=${length}`);
+    debugLog(`  执行删除: 起始位置=${position}, 长度=${length}`);
     
-    let currentPos = 0;
-    let remainingLength = length;
+    if (length <= 0) {
+      debugLog(`  ⚠️ 删除长度为0，跳过`);
+      return;
+    }
+    
+    const deleteStart = position;  // 删除起始位置（固定）
+    const deleteEnd = position + length;  // 删除结束位置（固定）
+    let currentPos = 0;  // 当前扫描到的 normal 文本位置
     let segmentIndex = 0;
     
-    while (segmentIndex < this.segments.length && remainingLength > 0) {
+    debugLog(`  删除范围: [${deleteStart}, ${deleteEnd})`);
+    
+    // 遍历所有片段
+    while (segmentIndex < this.segments.length) {
       const segment = this.segments[segmentIndex];
       
+      // 跳过已删除的片段（不计入位置）
       if (segment.type !== 'normal') {
         segmentIndex++;
         continue;
       }
       
-      const segmentEndPos = currentPos + segment.content.length;
+      const segmentStart = currentPos;
+      const segmentEnd = currentPos + segment.content.length;
       
-      if (position >= segmentEndPos) {
-        currentPos = segmentEndPos;
+      debugLog(`    检查片段 [${segmentIndex}]: 范围[${segmentStart}, ${segmentEnd}), 内容="${segment.content}"`);
+      
+      // 如果删除范围完全在当前片段之前，结束
+      if (deleteEnd <= segmentStart) {
+        debugLog(`    删除范围在片段之前，结束`);
+        break;
+      }
+      
+      // 如果删除范围完全在当前片段之后，继续
+      if (deleteStart >= segmentEnd) {
+        debugLog(`    删除范围在片段之后，继续`);
+        currentPos = segmentEnd;
         segmentIndex++;
         continue;
       }
       
-      const offsetInSegment = Math.max(0, position - currentPos);
-      const deleteInThisSegment = Math.min(remainingLength, segment.content.length - offsetInSegment);
+      // 删除范围与当前片段有交集，计算交集
+      const overlapStart = Math.max(deleteStart, segmentStart);
+      const overlapEnd = Math.min(deleteEnd, segmentEnd);
+      const overlapStartInSegment = overlapStart - segmentStart;
+      const overlapEndInSegment = overlapEnd - segmentStart;
       
-      if (offsetInSegment === 0 && deleteInThisSegment === segment.content.length) {
+      debugLog(`    交集: 片段内[${overlapStartInSegment}, ${overlapEndInSegment})`);
+      
+      if (overlapStartInSegment === 0 && overlapEndInSegment === segment.content.length) {
+        // 情况1: 删除整个片段
         segment.type = 'deleted';
         segment.deletedAt = version;
         segment.deletedAuthor = authorId;
         segment.deletedTimestamp = timestamp;
-      } else if (offsetInSegment === 0) {
-        const deletedPart = segment.content.substring(0, deleteInThisSegment);
-        const remainingPart = segment.content.substring(deleteInThisSegment);
+        debugLog(`    → 删除整个片段 "${segment.content}"`);
+        currentPos = segmentEnd;
+        segmentIndex++;
+      } else if (overlapStartInSegment === 0) {
+        // 情况2: 删除片段开头部分
+        const deletedPart = segment.content.substring(0, overlapEndInSegment);
+        const keepPart = segment.content.substring(overlapEndInSegment);
         
         this.segments.splice(segmentIndex, 1,
           { 
@@ -215,15 +265,19 @@ class DocumentSegmentManager {
           },
           { 
             type: 'normal', 
-            content: remainingPart, 
+            content: keepPart, 
             version: segment.version,
             author: segment.author,
             timestamp: segment.timestamp
           }
         );
-      } else if (offsetInSegment + deleteInThisSegment === segment.content.length) {
-        const keepPart = segment.content.substring(0, offsetInSegment);
-        const deletedPart = segment.content.substring(offsetInSegment);
+        debugLog(`    → 删除开头 "${deletedPart}"，保留 "${keepPart}"`);
+        currentPos = segmentEnd;
+        segmentIndex += 2;
+      } else if (overlapEndInSegment === segment.content.length) {
+        // 情况3: 删除片段末尾部分
+        const keepPart = segment.content.substring(0, overlapStartInSegment);
+        const deletedPart = segment.content.substring(overlapStartInSegment);
         
         this.segments.splice(segmentIndex, 1,
           { 
@@ -244,10 +298,14 @@ class DocumentSegmentManager {
             deletedTimestamp: timestamp
           }
         );
+        debugLog(`    → 保留开头 "${keepPart}"，删除末尾 "${deletedPart}"`);
+        currentPos = segmentEnd;
+        segmentIndex += 2;
       } else {
-        const beforePart = segment.content.substring(0, offsetInSegment);
-        const deletedPart = segment.content.substring(offsetInSegment, offsetInSegment + deleteInThisSegment);
-        const afterPart = segment.content.substring(offsetInSegment + deleteInThisSegment);
+        // 情况4: 删除片段中间部分
+        const beforePart = segment.content.substring(0, overlapStartInSegment);
+        const deletedPart = segment.content.substring(overlapStartInSegment, overlapEndInSegment);
+        const afterPart = segment.content.substring(overlapEndInSegment);
         
         this.segments.splice(segmentIndex, 1,
           { 
@@ -275,16 +333,13 @@ class DocumentSegmentManager {
             timestamp: segment.timestamp
           }
         );
+        debugLog(`    → 保留前 "${beforePart}"，删除中间 "${deletedPart}"，保留后 "${afterPart}"`);
+        currentPos = segmentEnd;
+        segmentIndex += 3;
       }
-      
-      remainingLength -= deleteInThisSegment;
-      currentPos += segment.content.length;
-      segmentIndex++;
     }
     
-    if (remainingLength > 0) {
-      console.warn(`⚠️ 警告: 删除操作未完全执行，剩余 ${remainingLength} 字符`);
-    }
+    debugLog(`  删除完成`);
   }
 
   _applyInsertion(position, content, version, authorId, timestamp) {
@@ -401,7 +456,7 @@ class DocumentSegmentManager {
     
     // ✅ 按照原始逻辑：按文档位置顺序遍历 segments 并合并
     // 这与 generatePadVersionSnapshots.js 的逻辑一致
-    const TIME_THRESHOLD = 3600000;  // 1小时
+    const TIME_THRESHOLD = 600000;  // 10分钟 = 600秒 = 600000毫秒
     const mergedHistory = [];
     let current = null;
     
@@ -413,20 +468,28 @@ class DocumentSegmentManager {
         operation = {
           behavior: 'add',
           author: segment.author || '',
-          start_time: this.formatHKTime(segment.timestamp),
-          end_time: this.formatHKTime(segment.timestamp),
-          start_timestamp: segment.timestamp,
-          end_timestamp: segment.timestamp,
+          add_start_time: this.formatHKTime(segment.timestamp),
+          add_end_time: this.formatHKTime(segment.timestamp),
+          add_start_timestamp: segment.timestamp,
+          add_end_timestamp: segment.timestamp,
+          delete_start_time: null,
+          delete_end_time: null,
+          delete_start_timestamp: null,
+          delete_end_timestamp: null,
           content: segment.content
         };
       } else if (segment.type === 'deleted') {
         operation = {
           behavior: 'deleted',
           author: segment.deletedAuthor || segment.author || '',
-          start_time: this.formatHKTime(segment.timestamp),
-          end_time: this.formatHKTime(segment.deletedTimestamp),
-          start_timestamp: segment.timestamp,
-          end_timestamp: segment.deletedTimestamp,
+          add_start_time: segment.timestamp ? this.formatHKTime(segment.timestamp) : null,
+          add_end_time: segment.timestamp ? this.formatHKTime(segment.timestamp) : null,
+          add_start_timestamp: segment.timestamp || null,
+          add_end_timestamp: segment.timestamp || null,
+          delete_start_time: this.formatHKTime(segment.deletedTimestamp),
+          delete_end_time: this.formatHKTime(segment.deletedTimestamp),
+          delete_start_timestamp: segment.deletedTimestamp,
+          delete_end_timestamp: segment.deletedTimestamp,
           content: segment.content
         };
       }
@@ -440,18 +503,26 @@ class DocumentSegmentManager {
       }
       
       // 3. 检查基本合并条件
-      const timeGap = operation.start_timestamp - current.end_timestamp;
+      let timeSpan = 0;
+      
+      if (current.behavior === 'add') {
+        // add 操作：|下一个.add_end_timestamp - 当前.add_start_timestamp|
+        timeSpan = Math.abs(operation.add_end_timestamp - current.add_start_timestamp);
+      } else if (current.behavior === 'deleted') {
+        // deleted 操作：|下一个.delete_end_timestamp - 当前.delete_start_timestamp|
+        timeSpan = Math.abs(operation.delete_end_timestamp - current.delete_start_timestamp);
+      }
+      
       const canMergeBasic = (
         current.behavior === operation.behavior && 
         current.author === operation.author &&
-        timeGap >= 0 && 
-        timeGap <= TIME_THRESHOLD
+        timeSpan <= TIME_THRESHOLD
       );
       
       if (!canMergeBasic) {
         // 基本条件不满足，不合并
-        if (timeGap > TIME_THRESHOLD) {
-          debugLog(`[Skip] Time gap too large: ${(timeGap / 1000 / 60).toFixed(1)} minutes`);
+        if (timeSpan > TIME_THRESHOLD) {
+          debugLog(`[Skip] Time span too large: ${(timeSpan / 1000 / 60).toFixed(1)} minutes`);
         } else {
           debugLog(`[Skip] Different behavior or author`);
         }
@@ -466,13 +537,27 @@ class DocumentSegmentManager {
       try {
         const sentenceCount = await this.sentenceSplitter.countSentences(mergedContent);
         
-        debugLog(`[Merge Check] Content: "${mergedContent.substring(0, 50)}...", Sentences: ${sentenceCount}, Time gap: ${(timeGap / 1000).toFixed(1)}s`);
+        debugLog(`[Merge Check] Content: "${mergedContent.substring(0, 50)}...", Sentences: ${sentenceCount}, Time span: ${(timeSpan / 1000).toFixed(1)}s`);
         
         if (sentenceCount <= 1) {
           // 可以合并
           current.content = mergedContent;
-          current.end_time = operation.end_time;
-          current.end_timestamp = operation.end_timestamp;
+          
+          // 更新时间：取最早的 start 和最晚的 end
+          if (current.behavior === 'add') {
+            // add 操作：保留 add_start，更新 add_end
+            current.add_end_time = operation.add_end_time;
+            current.add_end_timestamp = operation.add_end_timestamp;
+          } else if (current.behavior === 'deleted') {
+            // deleted 操作：更新 add_end 和 delete_end
+            if (operation.add_end_time) {
+              current.add_end_time = operation.add_end_time;
+              current.add_end_timestamp = operation.add_end_timestamp;
+            }
+            current.delete_end_time = operation.delete_end_time;
+            current.delete_end_timestamp = operation.delete_end_timestamp;
+          }
+          
           debugLog(`[Merge Success] Merged, total length: ${mergedContent.length}`);
           continue;
         } else {
@@ -497,7 +582,13 @@ class DocumentSegmentManager {
   }
 
   _cleanupOperation(operation) {
-    const { start_timestamp, end_timestamp, ...cleaned } = operation;
+    const { 
+      add_start_timestamp, 
+      add_end_timestamp, 
+      delete_start_timestamp, 
+      delete_end_timestamp, 
+      ...cleaned 
+    } = operation;
     return cleaned;
   }
 
@@ -588,38 +679,38 @@ class DatabaseManager {
   }
 
   async createChangesTable() {
+    // 先删除旧表（如果存在），确保表结构正确
+    await this.connection.execute('DROP TABLE IF EXISTS pad_version_changes_compare');
+    console.log('🗑️  删除旧表（如果存在）');
+    
     const createTableSQL = `
-      CREATE TABLE IF NOT EXISTS pad_version_changes_compare (
+      CREATE TABLE pad_version_changes_compare (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
-        pad_id VARCHAR(255) NOT NULL COMMENT 'Pad ID',
-        revision INT NOT NULL COMMENT '最终版本号（用于追溯）',
+        pad_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT 'Pad ID',
         seq_order INT NOT NULL COMMENT '操作顺序（从1开始）',
-        behavior VARCHAR(20) NOT NULL COMMENT '操作类型：add 或 deleted',
-        author VARCHAR(255) NOT NULL COMMENT '作者ID',
-        start_time VARCHAR(50) NOT NULL COMMENT '开始时间（香港时间）',
-        end_time VARCHAR(50) NOT NULL COMMENT '结束时间（香港时间）',
-        content LONGTEXT NOT NULL COMMENT '操作内容',
-        content_length INT COMMENT '内容长度',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        behavior VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '操作类型：add 或 deleted',
+        author VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '作者ID',
+        content LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '操作内容',
+        add_start_time VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容添加开始时间',
+        add_end_time VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容添加结束时间',
+        delete_start_time VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容删除开始时间',
+        delete_end_time VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容删除结束时间',
         
-        INDEX idx_pad_id (pad_id),
-        INDEX idx_pad_revision (pad_id, revision),
-        INDEX idx_behavior (behavior),
-        INDEX idx_author (author)
+        INDEX idx_pad_id(pad_id ASC) USING BTREE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci 
-        COMMENT='Pad版本变更详细记录表（对比分析用）'
+        COMMENT='Pad版本变更详细记录表（对比分析用）' ROW_FORMAT=Dynamic
     `;
 
     await this.connection.execute(createTableSQL);
-    console.log('✅ 变更表检查/创建完成（pad_version_changes_compare）');
+    console.log('✅ 变更表创建完成（pad_version_changes_compare）');
   }
 
   async getPadVersions(padId) {
-    // ✅ 从 pad_version_contents_merge 读取合并后的版本
-    // 这与 generatePadVersionSnapshots.js 的逻辑一致
+    // ✅ 从 pad_version_contents 读取原始版本数据
+    // 这与 generatePadVersionSnapshots.js 的逻辑一致（使用原始未合并的版本）
     const query = `
       SELECT pad_id, revision, content, author_id, timestamp
-      FROM pad_version_contents_merge
+      FROM pad_version_contents
       WHERE pad_id = ?
       ORDER BY revision ASC
     `;
@@ -639,20 +730,20 @@ class DatabaseManager {
   async insertChange(change) {
     const query = `
       INSERT INTO pad_version_changes_compare 
-      (pad_id, revision, seq_order, behavior, author, start_time, end_time, content, content_length)
+      (pad_id, seq_order, behavior, author, content, add_start_time, add_end_time, delete_start_time, delete_end_time)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     
     await this.connection.execute(query, [
       change.pad_id,
-      change.revision,
       change.seq_order,
       change.behavior,
       change.author,
-      change.start_time,
-      change.end_time,
       change.content,
-      change.content.length
+      change.add_start_time,
+      change.add_end_time,
+      change.delete_start_time,
+      change.delete_end_time
     ]);
   }
 
@@ -768,13 +859,14 @@ class PadChangeGenerator {
       // ✅ seq_order 按照操作历史数组的顺序（index + 1）
       // 这个顺序反映了文档片段在文档中的位置顺序
       const changes = result.changes.map((change, index) => ({
-          pad_id: padId,
-        revision: versions[versions.length - 1].revision,  // 最终版本号
+        pad_id: padId,
         seq_order: index + 1,  // 操作顺序从1开始
         behavior: change.behavior,
         author: change.author,
-        start_time: change.start_time,
-        end_time: change.end_time,
+        add_start_time: change.add_start_time,
+        add_end_time: change.add_end_time,
+        delete_start_time: change.delete_start_time,
+        delete_end_time: change.delete_end_time,
         content: change.content
       }));
 
@@ -786,7 +878,6 @@ class PadChangeGenerator {
       console.log(`${'='.repeat(70)}`);
       console.log(`Pad ID: ${padId}`);
       console.log(`总版本数: ${versions.length}`);
-      console.log(`最终版本号: ${versions[versions.length - 1].revision}`);
       console.log(`变更记录数: ${changes.length}`);
       console.log(`添加操作: ${changes.filter(c => c.behavior === 'add').length}`);
       console.log(`删除操作: ${changes.filter(c => c.behavior === 'deleted').length}`);
@@ -836,12 +927,15 @@ async function main() {
   node ${path.basename(__filename)} room-229 --debug
 
 说明:
-  整合版变更记录生成工具
+  整合版变更记录生成工具（对比分析用）
   - 一步完成：从版本内容直接生成变更记录
   - 消除冗余：不保存中间快照，直接输出变更表
   - 智能合并：支持 author + 时间 + 句子级别的合并判断
-  - 数据源：pad_version_contents
+  - 数据源：pad_version_contents（原始版本）
   - 目标表：pad_version_changes_compare
+  - 等价于：generatePadVersionSnapshots.js + exportToChangesTable.js
+  
+  用于对比两种方式的结果是否一致
     `);
     process.exit(0);
   }

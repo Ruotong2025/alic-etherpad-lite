@@ -90,7 +90,7 @@ def split_sentences_with_jieba(text):
 
 def count_sentences_enhanced(text):
     """
-    增强版分句：使用 jieba + NLTK 进行分句
+    增强版分句：只有中文才使用 jieba + NLTK，纯英文直接使用 NLTK
     
     Args:
         text (str): 要分析的文本
@@ -103,13 +103,23 @@ def count_sentences_enhanced(text):
     if not text or not text.strip():
         return 0
     
-    # 使用 jieba + NLTK 分句
     try:
-        sentences = split_sentences_with_jieba(text)
+        # 检查是否包含中文字符
+        has_chinese = bool(re.search(r'[\u4e00-\u9fff]', text))
+        
+        if has_chinese:
+            # 包含中文，使用 jieba + NLTK 分句
+            sentences = split_sentences_with_jieba(text)
+        else:
+            # 纯英文，直接使用 NLTK 分句
+            # 转换中文标点为英文标点，便于 NLTK 识别
+            text_converted = text.replace('。', '.').replace('！', '!').replace('？', '?').replace('；', ';')
+            sentences = nltk.tokenize.sent_tokenize(text_converted)
+        
         non_empty_sentences = [s for s in sentences if s.strip()]
         return len(non_empty_sentences)
     except Exception as e:
-        # 如果 jieba 失败，回退到简单计数
+        # 如果分句失败，回退到简单计数
         # 至少返回 1（表示有内容）
         return 1
 

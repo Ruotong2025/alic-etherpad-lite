@@ -12,9 +12,10 @@ A comprehensive toolkit for Etherpad version tracking, diff calculation, and cha
 |--------|----------|----------|--------------|
 | `PadContentRebuild.js` | Rebuild pad content from store | `src/` directory | Etherpad modules |
 | `PadContentMerge.js` | Merge consecutive edits | Any | settings.json |
-| `generatePadVersionSnapshots.js` | Generate version snapshots (compare mode) | Any | pad_version_contents, Python 3, NLTK |
+| `generatePadVersionSnapshots.js` | Generate version snapshots | Any | pad_version_contents, Python 3, NLTK |
 | `exportToChangesTable.js` | Export to changes table | Any | pad_version_snapshots |
-| `compare-snapshots.js` | Compare snapshot sources | Any | MySQL |
+| `generatePadChanges.js` 🆕 | One-step changes generation (for comparison) | Any | pad_version_contents, Python 3, NLTK |
+| `compare-changes-tables.js` 🆕 | Compare two changes tables | Any | MySQL |
 | `SentenceSplitter.js` | Node.js wrapper for Python NLTK | N/A (library) | python-shell, sentence_splitter.py |
 | `sentence_splitter.py` | Python NLTK sentence tokenizer | N/A (library) | NLTK |
 
@@ -33,10 +34,9 @@ Merges consecutive edits by the same author within short time windows.
 ### 3. `generatePadVersionSnapshots.js` ⭐ (Compare Mode)
 Core snapshot generation script using `diff-match-patch` algorithm with **NLTK sentence-level merge**.
 
-**⚠️ IMPORTANT - Compare Mode:**
-- **Data Source**: `pad_version_contents` (original, non-merged versions)
-- **Target Table**: `pad_version_snapshots_compare` (for comparison analysis)
-- **Purpose**: Compare results with merged version processing
+**Data Flow:**
+- **Data Source**: `pad_version_contents` (original versions)
+- **Target Table**: `pad_version_snapshots` (standard snapshot table)
 
 **Key Features:**
 - ✅ Accurate text diff calculation
@@ -60,13 +60,17 @@ Operation 2: " world"             (still 1 sentence)
 Result: MERGED to "Hello world"
 ```
 
-**Data Flow (Compare Mode):**
+**Data Flow:**
 ```
 pad_version_contents (原始版本)
        ↓
 generatePadVersionSnapshots.js
        ↓
-pad_version_snapshots_compare (对比表)
+pad_version_snapshots (标准快照表)
+       ↓
+exportToChangesTable.js
+       ↓
+pad_version_changes (最终变更记录表)
 ```
 
 ### 4. `SentenceSplitter.js` & `sentence_splitter.py`
@@ -88,19 +92,63 @@ console.log(count); // 2
 splitter.close(); // Clean up
 ```
 
-### 5. `generatePadChanges.js`
-Generates specific changes between versions from snapshot data.
+### 5. `generatePadChanges.js` 🆕 (One-Step Generation)
+Generates change records in one step, combining the functionality of `generatePadVersionSnapshots.js` + `exportToChangesTable.js`.
 
-### 6. `compare-snapshots.js` 🆕
-Compares snapshot data from different sources.
-- Compares `pad_version_snapshots` (merged) vs `pad_version_snapshots_compare` (original)
-- Shows deletion count differences
-- Compares text length and content
-- Analyzes operation history differences
+**⚠️ IMPORTANT:**
+- **Data Source**: `pad_version_contents` (original versions)
+- **Target Table**: `pad_version_changes_compare` (for comparison)
+- **Purpose**: Verify algorithm correctness by comparing with standard two-step process
+
+**Key Features:**
+- ✅ Same diff algorithm as `generatePadVersionSnapshots.js`
+- ✅ Same merge logic (NLTK sentence-level)
+- ✅ Direct output to changes table (no intermediate snapshot table)
+- ✅ Used for validation and comparison
 
 **Usage:**
 ```bash
-node compare-snapshots.js room-229
+# Basic usage
+node generatePadChanges.js room-229
+
+# Debug mode
+node generatePadChanges.js room-229 --debug
+```
+
+**Data Flow:**
+```
+pad_version_contents
+    ↓
+[generatePadChanges.js]
+    ↓
+pad_version_changes_compare
+```
+
+### 6. `compare-changes-tables.js` 🆕 (Verification Tool)
+Compares `pad_version_changes` and `pad_version_changes_compare` tables to verify consistency.
+
+**Features:**
+- Compares record counts and statistics
+- Validates reconstructed text
+- Checks individual records
+- Reports differences
+
+**Usage:**
+```bash
+node compare-changes-tables.js room-229
+```
+
+**Typical Workflow:**
+```bash
+# Step 1: Standard two-step process
+node generatePadVersionSnapshots.js room-229
+node exportToChangesTable.js room-229
+
+# Step 2: One-step process
+node generatePadChanges.js room-229
+
+# Step 3: Compare results
+node compare-changes-tables.js room-229
 ```
 
 ### 7. `exportToChangesTable.js`
@@ -160,11 +208,11 @@ pad_version_contents (原始版本)
     ↓
 [generatePadVersionSnapshots.js] ← Uses NLTK (sentence_splitter.py)
     ↓
-pad_version_snapshots_compare (对比表)
+pad_version_snapshots (标准快照表)
     ↓
-[compare-snapshots.js] ← Compare both sources
+[exportToChangesTable.js] ← Parse and flatten operations
     ↓
-Analysis Report
+pad_version_changes (最终变更记录表)
 ```
 
 ---
@@ -203,14 +251,14 @@ node test-sentence-splitter.js
 cd d:\ALIC\alic-etherpad-lite\src
 node --require tsx/cjs node/scheduler/etherpad_changes/PadContentRebuild.js room-229
 
-# Step 2: Generate compare snapshots from original versions
+# Step 2: Generate snapshots from original versions
 cd node/scheduler/etherpad_changes
 node generatePadVersionSnapshots.js room-229
-# → Outputs to pad_version_snapshots_compare
+# → Outputs to pad_version_snapshots
 
-# Step 3: Compare with merged version (if you have it)
-node compare-snapshots.js room-229
-# → Shows differences between merged and original processing
+# Step 3: Export to changes table
+node exportToChangesTable.js room-229
+# → Outputs to pad_version_changes
 ```
 
 ### Option 2: Update Only (Existing Data)

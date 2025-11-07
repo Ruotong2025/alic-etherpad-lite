@@ -11,16 +11,23 @@
  * 5. 集成 NLTK 句子级别合并判断
  * 6. ✅ 统一合并逻辑：移除片段级合并，只在构建操作历史时合并一次
  * 7. ✅ 逐步合并策略：边遍历边判断，不丢失可合并的片段
- * 8. ✅ 保留完整时间信息：记录每个操作的 start_time 和 end_time
+ * 8. ✅ 保留完整时间信息：区分添加时间和删除时间
+ * 
+ * 时间字段说明：
+ * - add_start_time/add_end_time: 内容添加的时间范围
+ * - delete_start_time/delete_end_time: 内容删除的时间范围
+ * - 一直存在的内容：add_start_time = null
+ * - 从未删除的内容：delete_start_time = null
  * 
  * 合并策略：
- * - 合并条件：behavior 相同 + author 相同 + 时间间隔 ≤ 1小时 + 合并后仍是单句话
- * - 逐步判断：每次只尝试合并相邻的两个操作，避免跨句子合并
- * - 时间保留：合并时保留第一个操作的 start_time 和最后一个操作的 end_time
+ * - 合并条件：behavior 相同 + author 相同 + 时间跨度 ≤ 10分钟 + 合并后仍是单句话
+ * - add 合并：|下一个.add_end_time - 当前.add_start_time| ≤ 10分钟
+ * - deleted 合并：|下一个.delete_end_time - 当前.delete_start_time| ≤ 10分钟
+ * - 时间保留：合并时保留最早的 start 和最晚的 end
  * 
  * 数据流向：
  * - 数据源：pad_version_contents (未合并的原始版本数据)
- * - 目标表：pad_version_snapshots_compare (用于对比分析)
+ * - 目标表：pad_version_snapshots (标准快照表)
  * 
  * 使用方法: node generatePadVersionSnapshots.js <padId> [--debug]
  */
@@ -611,20 +618,28 @@ class DocumentSegmentManager {
         operation = {
           behavior: 'add',
           author: segment.author || '',
-          start_time: this.formatHKTime(segment.timestamp),
-          end_time: this.formatHKTime(segment.timestamp),
-          start_timestamp: segment.timestamp,  // 保留原始时间戳用于计算
-          end_timestamp: segment.timestamp,
+          add_start_time: this.formatHKTime(segment.timestamp),
+          add_end_time: this.formatHKTime(segment.timestamp),
+          add_start_timestamp: segment.timestamp,  // 保留原始时间戳用于计算
+          add_end_timestamp: segment.timestamp,
+          delete_start_time: null,
+          delete_end_time: null,
+          delete_start_timestamp: null,
+          delete_end_timestamp: null,
           content: segment.content
         };
       } else if (segment.type === 'deleted') {
         operation = {
           behavior: 'deleted',
           author: segment.deletedAuthor || segment.author || '',
-          start_time: this.formatHKTime(segment.timestamp),
-          end_time: this.formatHKTime(segment.deletedTimestamp),
-          start_timestamp: segment.timestamp,
-          end_timestamp: segment.deletedTimestamp,
+          add_start_time: segment.timestamp ? this.formatHKTime(segment.timestamp) : null,
+          add_end_time: segment.timestamp ? this.formatHKTime(segment.timestamp) : null,
+          add_start_timestamp: segment.timestamp || null,
+          add_end_timestamp: segment.timestamp || null,
+          delete_start_time: this.formatHKTime(segment.deletedTimestamp),
+          delete_end_time: this.formatHKTime(segment.deletedTimestamp),
+          delete_start_timestamp: segment.deletedTimestamp,
+          delete_end_timestamp: segment.deletedTimestamp,
           content: segment.content
         };
       }
@@ -638,18 +653,26 @@ class DocumentSegmentManager {
       }
       
       // 3. 检查基本合并条件
-      const timeGap = operation.start_timestamp - current.end_timestamp;
+      let timeSpan = 0;
+      
+      if (current.behavior === 'add') {
+        // add 操作：|下一个.add_end_timestamp - 当前.add_start_timestamp|
+        timeSpan = Math.abs(operation.add_end_timestamp - current.add_start_timestamp);
+      } else if (current.behavior === 'deleted') {
+        // deleted 操作：|下一个.delete_end_timestamp - 当前.delete_start_timestamp|
+        timeSpan = Math.abs(operation.delete_end_timestamp - current.delete_start_timestamp);
+      }
+      
       const canMergeBasic = (
         current.behavior === operation.behavior && 
         current.author === operation.author &&
-        timeGap >= 0 && 
-        timeGap <= TIME_THRESHOLD
+        timeSpan <= TIME_THRESHOLD
       );
       
       if (!canMergeBasic) {
         // 基本条件不满足，不合并
-        if (timeGap > TIME_THRESHOLD) {
-          debugLog(`[Skip] Time gap too large: ${(timeGap / 1000 / 60).toFixed(1)} minutes`);
+        if (timeSpan > TIME_THRESHOLD) {
+          debugLog(`[Skip] Time span too large: ${(timeSpan / 1000 / 60).toFixed(1)} minutes`);
         } else {
           debugLog(`[Skip] Different behavior or author`);
         }
@@ -664,13 +687,27 @@ class DocumentSegmentManager {
       try {
         const sentenceCount = await this.sentenceSplitter.countSentences(mergedContent);
         
-        debugLog(`[Merge Check] Content: "${mergedContent.substring(0, 50)}...", Sentences: ${sentenceCount}, Time gap: ${(timeGap / 1000).toFixed(1)}s`);
+        debugLog(`[Merge Check] Content: "${mergedContent.substring(0, 50)}...", Sentences: ${sentenceCount}, Time span: ${(timeSpan / 1000).toFixed(1)}s`);
         
         if (sentenceCount <= 1) {
           // ✅ 可以合并：仍然是单句话
           current.content = mergedContent;
-          current.end_time = operation.end_time;
-          current.end_timestamp = operation.end_timestamp;
+          
+          // 更新时间：取最早的 start 和最晚的 end
+          if (current.behavior === 'add') {
+            // add 操作：保留 add_start，更新 add_end
+            current.add_end_time = operation.add_end_time;
+            current.add_end_timestamp = operation.add_end_timestamp;
+          } else if (current.behavior === 'deleted') {
+            // deleted 操作：更新 add_end 和 delete_end
+            if (operation.add_end_time) {
+              current.add_end_time = operation.add_end_time;
+              current.add_end_timestamp = operation.add_end_timestamp;
+            }
+            current.delete_end_time = operation.delete_end_time;
+            current.delete_end_timestamp = operation.delete_end_timestamp;
+          }
+          
           debugLog(`[Merge Success] Merged, total length: ${mergedContent.length}`);
           continue;  // 继续尝试合并下一个片段
         } else {
@@ -699,7 +736,13 @@ class DocumentSegmentManager {
    * 清理操作对象（移除内部使用的时间戳字段）
    */
   _cleanupOperation(operation) {
-    const { start_timestamp, end_timestamp, ...cleaned } = operation;
+    const { 
+      add_start_timestamp, 
+      add_end_timestamp, 
+      delete_start_timestamp, 
+      delete_end_timestamp, 
+      ...cleaned 
+    } = operation;
     return cleaned;
   }
 
@@ -832,7 +875,7 @@ class DatabaseManager {
 
   async createSnapshotTable() {
     const createTableSQL = `
-      CREATE TABLE IF NOT EXISTS pad_version_snapshots_compare (
+      CREATE TABLE IF NOT EXISTS pad_version_snapshots (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
         pad_id VARCHAR(255) NOT NULL,
         revision INT NOT NULL,
@@ -851,7 +894,7 @@ class DatabaseManager {
     `;
 
     await this.connection.execute(createTableSQL);
-    console.log('✅ 快照对比表检查/创建完成（pad_version_snapshots_compare）');
+    console.log('✅ 快照表检查/创建完成（pad_version_snapshots）');
   }
 
   async getPadVersions(padId) {
@@ -868,7 +911,7 @@ class DatabaseManager {
 
   async clearPadSnapshots(padId) {
     await this.connection.execute(
-      'DELETE FROM pad_version_snapshots_compare WHERE pad_id = ?',
+      'DELETE FROM pad_version_snapshots WHERE pad_id = ?',
       [padId]
     );
     console.log('🗑️  清理旧的快照对比数据');
@@ -876,7 +919,7 @@ class DatabaseManager {
 
   async insertSnapshot(snapshot) {
     const query = `
-      INSERT INTO pad_version_snapshots_compare 
+      INSERT INTO pad_version_snapshots 
       (pad_id, revision, snapshot_text, pure_text, author_id, timestamp, deletion_count, deletions_json)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `;

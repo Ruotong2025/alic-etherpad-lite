@@ -2,6 +2,11 @@
 
 /**
  * 将 pad_version_snapshots.deletions_json 解析并存储到 pad_version_changes 表
+ * 
+ * 增量更新逻辑：
+ * - 如果 pad_id 不存在，直接插入所有记录
+ * - 如果 pad_id 已存在，先删除该 pad 的旧记录，再插入新记录
+ * - seq_order 按照 deletions_json 数组的顺序排列（从1开始）
  */
 
 const mysql = require('mysql2/promise');
@@ -38,29 +43,28 @@ class ChangeTableManager {
   }
 
   /**
-   * 创建 pad_version_changes 表
+   * 创建 pad_version_changes 表（如果不存在）
    */
-  async createChangesTable() {
-    // 先删除旧表（如果存在）
-    await this.connection.execute('DROP TABLE IF EXISTS pad_version_changes');
-    
+  async ensureChangesTable() {
     const createTableSQL = `
-      CREATE TABLE pad_version_changes (
+      CREATE TABLE IF NOT EXISTS pad_version_changes (
         id BIGINT AUTO_INCREMENT,
         pad_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT 'Pad ID',
         seq_order INT NOT NULL COMMENT '操作顺序（从1开始）',
         behavior VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '操作类型：add 或 deleted',
         author VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '作者ID',
-        start_time VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '开始时间（香港时间）',
-        end_time VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '结束时间（香港时间）',
         content LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '操作内容',
+        add_start_time VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容添加开始时间',
+        add_end_time VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容添加结束时间',
+        delete_start_time VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容删除开始时间',
+        delete_end_time VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容删除结束时间',
         PRIMARY KEY (id) USING BTREE,
         INDEX idx_pad_id(pad_id ASC) USING BTREE
-      ) COMMENT='Pad版本变更详细记录表（仅保存最新版本）' ROW_FORMAT=Dynamic;
+      ) COMMENT='Pad版本变更详细记录表（增量更新）' ROW_FORMAT=Dynamic;
     `;
 
     await this.connection.execute(createTableSQL);
-    console.log('✅ pad_version_changes 表创建完成');
+    console.log('✅ pad_version_changes 表已就绪');
   }
 
   /**
@@ -80,14 +84,26 @@ class ChangeTableManager {
   }
 
   /**
-   * 清空指定 pad 的变更记录
+   * 检查指定 pad 是否存在变更记录
    */
-  async clearChanges(padId) {
-    await this.connection.execute(
+  async padExists(padId) {
+    const [rows] = await this.connection.execute(
+      'SELECT COUNT(*) as count FROM pad_version_changes WHERE pad_id = ?',
+      [padId]
+    );
+    return rows[0].count > 0;
+  }
+
+  /**
+   * 删除指定 pad 的所有变更记录
+   */
+  async deletePadChanges(padId) {
+    const [result] = await this.connection.execute(
       'DELETE FROM pad_version_changes WHERE pad_id = ?',
       [padId]
     );
-    console.log('🗑️  清理旧的变更记录');
+    console.log(`🗑️  删除旧记录: ${result.affectedRows} 条`);
+    return result.affectedRows;
   }
 
   /**
@@ -100,8 +116,8 @@ class ChangeTableManager {
     
     const query = `
       INSERT INTO pad_version_changes 
-      (pad_id, seq_order, behavior, author, start_time, end_time, content)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      (pad_id, seq_order, behavior, author, content, add_start_time, add_end_time, delete_start_time, delete_end_time)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     let successCount = 0;
@@ -113,9 +129,11 @@ class ChangeTableManager {
           change.change_order,
           change.behavior,
           change.author,
-          change.start_time,
-          change.end_time,
-          change.content
+          change.content,
+          change.add_start_time,
+          change.add_end_time,
+          change.delete_start_time,
+          change.delete_end_time
         ]);
         successCount++;
         
@@ -151,7 +169,7 @@ class ChangeExporter {
       await this.db.connect();
       
       console.log('🔧 检查/创建 pad_version_changes 表...');
-      await this.db.createChangesTable();
+      await this.db.ensureChangesTable();
 
       console.log(`\n📖 读取最新版本快照...`);
       const latestSnapshot = await this.db.getLatestSnapshot(padId);
@@ -163,7 +181,15 @@ class ChangeExporter {
 
       console.log(`✅ 读取到最新版本: ${latestSnapshot.revision}\n`);
 
-      await this.db.clearChanges(padId);
+      // 检查是否已存在该 pad 的数据
+      const exists = await this.db.padExists(padId);
+      
+      if (exists) {
+        console.log(`🔍 检测到重复的 pad_id，执行更新操作...`);
+        await this.db.deletePadChanges(padId);
+      } else {
+        console.log(`➕ 新增 pad_id，执行插入操作...`);
+      }
 
       console.log('🔄 开始解析 JSON 并转换...');
       
@@ -189,8 +215,10 @@ class ChangeExporter {
           change_order: index + 1,  // 从1开始
           behavior: operation.behavior,
           author: operation.author,
-          start_time: operation.start_time,
-          end_time: operation.end_time,
+          add_start_time: operation.add_start_time,
+          add_end_time: operation.add_end_time,
+          delete_start_time: operation.delete_start_time,
+          delete_end_time: operation.delete_end_time,
           content: operation.content
         });
       });
@@ -236,6 +264,11 @@ async function main() {
 说明:
   将 pad_version_snapshots 表中的 deletions_json 字段解析并存储到 
   pad_version_changes 表中，每条操作记录作为一行数据。
+
+增量更新策略:
+  - 如果 pad_id 在表中已存在 → 删除旧记录，插入新记录
+  - 如果 pad_id 在表中不存在 → 直接插入新记录
+  - seq_order 按照 deletions_json 数组的顺序（从1开始）
     `);
     process.exit(0);
   }
