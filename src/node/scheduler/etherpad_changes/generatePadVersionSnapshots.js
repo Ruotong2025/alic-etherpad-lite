@@ -69,8 +69,8 @@ class TextDiffCalculator {
    */
   calculateDiff(oldText, newText) {
     if (!oldText && !newText) return [];
-    if (!oldText) return [{ type: 'insert', position: 0, content: newText }];
-    if (!newText) return [{ type: 'delete', position: 0, length: oldText.length, content: oldText }];
+    if (!oldText) return [{ type: 'insert', oldPosition: 0, newPosition: 0, content: newText }];
+    if (!newText) return [{ type: 'delete', oldPosition: 0, newPosition: 0, length: oldText.length, content: oldText }];
 
     // 使用 diff-match-patch 计算差异
     const diffs = this.dmp.diff_main(oldText, newText);
@@ -214,50 +214,82 @@ class DocumentSegmentManager {
 
   /**
    * 应用删除操作
+   * 
+   * 关键：删除操作从指定位置开始，持续删除指定长度的字符
+   * - position: 在 normal 文本中的起始位置（不包括 deleted 片段）
+   * - length: 要删除的字符数
+   * 
+   * 算法：
+   * 1. 遍历所有 normal 片段
+   * 2. 找到删除范围[position, position+length)覆盖的所有片段
+   * 3. 对每个片段进行相应的删除或分割操作
    */
   _applyDeletion(position, length, version, authorId, timestamp) {
-    debugLog(`  执行删除: 位置=${position}, 长度=${length}`);
+    debugLog(`  执行删除: 起始位置=${position}, 长度=${length}`);
     
-    // 找到删除的起始位置
-    let currentPos = 0;
-    let remainingLength = length;
+    if (length <= 0) {
+      debugLog(`  ⚠️ 删除长度为0，跳过`);
+      return;
+    }
+    
+    const deleteStart = position;  // 删除起始位置（固定）
+    const deleteEnd = position + length;  // 删除结束位置（固定）
+    let currentPos = 0;  // 当前扫描到的 normal 文本位置
     let segmentIndex = 0;
     
-    // 定位到起始片段
-    while (segmentIndex < this.segments.length && remainingLength > 0) {
+    debugLog(`  删除范围: [${deleteStart}, ${deleteEnd})`);
+    
+    // 遍历所有片段
+    while (segmentIndex < this.segments.length) {
       const segment = this.segments[segmentIndex];
       
+      // 跳过已删除的片段（不计入位置）
       if (segment.type !== 'normal') {
         segmentIndex++;
         continue;
       }
       
-      const segmentEndPos = currentPos + segment.content.length;
+      const segmentStart = currentPos;
+      const segmentEnd = currentPos + segment.content.length;
       
-      if (position >= segmentEndPos) {
-        // 删除位置在这个片段之后
-        currentPos = segmentEndPos;
+      debugLog(`    检查片段 [${segmentIndex}]: 范围[${segmentStart}, ${segmentEnd}), 内容="${segment.content}"`);
+      
+      // 如果删除范围完全在当前片段之前，结束
+      if (deleteEnd <= segmentStart) {
+        debugLog(`    删除范围在片段之前，结束`);
+        break;
+      }
+      
+      // 如果删除范围完全在当前片段之后，继续
+      if (deleteStart >= segmentEnd) {
+        debugLog(`    删除范围在片段之后，继续`);
+        currentPos = segmentEnd;
         segmentIndex++;
         continue;
       }
       
-      // 删除位置在当前片段内或之前
-      const offsetInSegment = Math.max(0, position - currentPos);
-      const deleteInThisSegment = Math.min(remainingLength, segment.content.length - offsetInSegment);
+      // 删除范围与当前片段有交集，计算交集
+      const overlapStart = Math.max(deleteStart, segmentStart);
+      const overlapEnd = Math.min(deleteEnd, segmentEnd);
+      const overlapStartInSegment = overlapStart - segmentStart;
+      const overlapEndInSegment = overlapEnd - segmentStart;
+      const overlapLength = overlapEndInSegment - overlapStartInSegment;
       
-      debugLog(`    片段 ${segmentIndex}: 偏移=${offsetInSegment}, 删除=${deleteInThisSegment}`);
+      debugLog(`    交集: 片段内[${overlapStartInSegment}, ${overlapEndInSegment}), 长度=${overlapLength}`);
       
-      if (offsetInSegment === 0 && deleteInThisSegment === segment.content.length) {
-        // 删除整个片段
+      if (overlapStartInSegment === 0 && overlapEndInSegment === segment.content.length) {
+        // 情况1: 删除整个片段
         segment.type = 'deleted';
         segment.deletedAt = version;
         segment.deletedAuthor = authorId;
         segment.deletedTimestamp = timestamp;
-        debugLog(`    标记整个片段为删除`);
-      } else if (offsetInSegment === 0) {
-        // 删除片段开头部分
-        const deletedPart = segment.content.substring(0, deleteInThisSegment);
-        const remainingPart = segment.content.substring(deleteInThisSegment);
+        debugLog(`    → 删除整个片段 "${segment.content}"`);
+        currentPos = segmentEnd;
+        segmentIndex++;
+      } else if (overlapStartInSegment === 0) {
+        // 情况2: 删除片段开头部分
+        const deletedPart = segment.content.substring(0, overlapEndInSegment);
+        const keepPart = segment.content.substring(overlapEndInSegment);
         
         this.segments.splice(segmentIndex, 1,
           { 
@@ -272,17 +304,19 @@ class DocumentSegmentManager {
           },
           { 
             type: 'normal', 
-            content: remainingPart, 
+            content: keepPart, 
             version: segment.version,
             author: segment.author,
             timestamp: segment.timestamp
           }
         );
-        debugLog(`    分割片段: 删除开头 ${deleteInThisSegment} 字符`);
-      } else if (offsetInSegment + deleteInThisSegment === segment.content.length) {
-        // 删除片段末尾部分
-        const keepPart = segment.content.substring(0, offsetInSegment);
-        const deletedPart = segment.content.substring(offsetInSegment);
+        debugLog(`    → 删除开头 "${deletedPart}"，保留 "${keepPart}"`);
+        currentPos = segmentEnd;
+        segmentIndex += 2;
+      } else if (overlapEndInSegment === segment.content.length) {
+        // 情况3: 删除片段末尾部分
+        const keepPart = segment.content.substring(0, overlapStartInSegment);
+        const deletedPart = segment.content.substring(overlapStartInSegment);
         
         this.segments.splice(segmentIndex, 1,
           { 
@@ -303,12 +337,14 @@ class DocumentSegmentManager {
             deletedTimestamp: timestamp
           }
         );
-        debugLog(`    分割片段: 删除末尾 ${deleteInThisSegment} 字符`);
+        debugLog(`    → 保留开头 "${keepPart}"，删除末尾 "${deletedPart}"`);
+        currentPos = segmentEnd;
+        segmentIndex += 2;
       } else {
-        // 删除片段中间部分
-        const beforePart = segment.content.substring(0, offsetInSegment);
-        const deletedPart = segment.content.substring(offsetInSegment, offsetInSegment + deleteInThisSegment);
-        const afterPart = segment.content.substring(offsetInSegment + deleteInThisSegment);
+        // 情况4: 删除片段中间部分
+        const beforePart = segment.content.substring(0, overlapStartInSegment);
+        const deletedPart = segment.content.substring(overlapStartInSegment, overlapEndInSegment);
+        const afterPart = segment.content.substring(overlapEndInSegment);
         
         this.segments.splice(segmentIndex, 1,
           { 
@@ -336,17 +372,13 @@ class DocumentSegmentManager {
             timestamp: segment.timestamp
           }
         );
-        debugLog(`    分割片段: 删除中间 ${deleteInThisSegment} 字符`);
+        debugLog(`    → 保留前 "${beforePart}"，删除中间 "${deletedPart}"，保留后 "${afterPart}"`);
+        currentPos = segmentEnd;
+        segmentIndex += 3;
       }
-      
-      remainingLength -= deleteInThisSegment;
-      currentPos += segment.content.length;
-      segmentIndex++;
     }
     
-    if (remainingLength > 0) {
-      console.warn(`⚠️ 警告: 删除操作未完全执行，剩余 ${remainingLength} 字符`);
-    }
+    debugLog(`  删除完成`);
   }
 
   /**
@@ -1026,6 +1058,10 @@ class PadSnapshotGeneratorV3 {
       console.error(error.stack);
       throw error;
     } finally {
+      // 清理句子分割器资源
+      if (this.snapshotBuilder && this.snapshotBuilder.docManager) {
+        this.snapshotBuilder.docManager.cleanupSentenceSplitter();
+      }
       await this.db.close();
     }
   }
