@@ -600,7 +600,7 @@ class DocumentSegmentManager {
   }
 
   /**
-   * 将时间戳转换为香港时间格式
+   * 将时间戳转换为香港时间格式（保留毫秒）
    */
   formatHKTime(timestamp) {
     if (!timestamp) return '';
@@ -619,9 +619,14 @@ class DocumentSegmentManager {
       hour12: false
     });
     
-    // 格式化为 YYYY-MM-DD HH:mm:ss
+    // 获取毫秒部分（3位）
+    const milliseconds = date.getMilliseconds().toString().padStart(3, '0');
+    
+    // 格式化为 YYYY-MM-DD HH:mm:ss.SSS
     // toLocaleString 返回格式可能是 "2025/10/26 20:30:00" 或 "2025-10-26 20:30:00"
-    return hkTimeStr.replace(/\//g, '-').replace(',', '');
+    const formattedTime = hkTimeStr.replace(/\//g, '-').replace(',', '');
+    
+    return `${formattedTime}.${milliseconds}`;
   }
 
   /**
@@ -630,8 +635,14 @@ class DocumentSegmentManager {
    * 合并条件：
    * 1. behavior 相同（都是 add 或 deleted）
    * 2. author 相同
-   * 3. 时间间隔 ≤ 1小时（3600秒 = 3600000毫秒）
+   * 3. 时间条件（时间单位：毫秒）：
+   *    - deleted 操作：后一条的 delete_start_time ≤ 前一条的 delete_end_time，且时间差 ≤ 10分钟
+   *    - add 操作：前一条的 add_start_time ≤ 后一条的 add_end_time，且时间差 ≤ 10分钟
    * 4. 合并后仍是单句话（≤ 1句）
+   * 
+   * 合并后的时间处理：
+   * - deleted 操作：取最小值为 delete_start_time，最大值为 delete_end_time
+   * - add 操作：取最小值为 add_start_time，最大值为 add_end_time
    * 
    * 采用逐步合并策略：
    * - 每次只尝试合并当前操作和下一个操作
@@ -645,7 +656,7 @@ class DocumentSegmentManager {
     // 初始化句子分割器
     this.initSentenceSplitter();
     
-    const TIME_THRESHOLD = 3600000;  // 1小时 = 3600秒 = 3600000毫秒
+    const TIME_THRESHOLD = 600000;  // 10分钟 = 600000毫秒
     const mergedHistory = [];
     let current = null;
     
@@ -657,20 +668,20 @@ class DocumentSegmentManager {
         operation = {
           behavior: 'add',
           author: segment.author || '',
-          start_time: this.formatHKTime(segment.timestamp),
-          end_time: this.formatHKTime(segment.timestamp),
-          start_timestamp: segment.timestamp,  // 保留原始时间戳用于计算
-          end_timestamp: segment.timestamp,
+          add_start_time: this.formatHKTime(segment.timestamp),
+          add_end_time: this.formatHKTime(segment.timestamp),
+          delete_start_time: null,
+          delete_end_time: null,
           content: segment.content
         };
       } else if (segment.type === 'deleted') {
         operation = {
           behavior: 'deleted',
           author: segment.deletedAuthor || segment.author || '',
-          start_time: this.formatHKTime(segment.timestamp),
-          end_time: this.formatHKTime(segment.deletedTimestamp),
-          start_timestamp: segment.timestamp,
-          end_timestamp: segment.deletedTimestamp,
+          add_start_time: this.formatHKTime(segment.timestamp),
+          add_end_time: this.formatHKTime(segment.timestamp),
+          delete_start_time: this.formatHKTime(segment.deletedTimestamp),
+          delete_end_time: this.formatHKTime(segment.deletedTimestamp),
           content: segment.content
         };
       }
@@ -684,22 +695,37 @@ class DocumentSegmentManager {
       }
       
       // 3. 检查基本合并条件
-      const timeGap = operation.start_timestamp - current.end_timestamp;
+      let canMergeTime = false;
+      let timeGap = 0;
+      
+      if (current.behavior === 'add') {
+        // add 操作：前一条的 add_start_time ≤ 后一条的 add_end_time
+        const currentStartTime = new Date(current.add_start_time).getTime();
+        const operationEndTime = new Date(operation.add_end_time).getTime();
+        timeGap = Math.abs(operationEndTime - currentStartTime);
+        canMergeTime = currentStartTime <= operationEndTime && timeGap <= TIME_THRESHOLD;
+      } else {
+        // deleted 操作：后一条的 delete_start_time ≤ 前一条的 delete_end_time
+        const currentEndTime = new Date(current.delete_end_time).getTime();
+        const operationStartTime = new Date(operation.delete_start_time).getTime();
+        timeGap = Math.abs(operationStartTime - currentEndTime);
+        canMergeTime = operationStartTime <= currentEndTime && timeGap <= TIME_THRESHOLD;
+      }
+      
       const canMergeBasic = (
         current.behavior === operation.behavior && 
         current.author === operation.author &&
-        timeGap >= 0 && 
-        timeGap <= TIME_THRESHOLD
+        canMergeTime
       );
       
       if (!canMergeBasic) {
         // 基本条件不满足，不合并
-        if (timeGap > TIME_THRESHOLD) {
-          debugLog(`[Skip] Time gap too large: ${(timeGap / 1000 / 60).toFixed(1)} minutes`);
+        if (!canMergeTime) {
+          debugLog(`[Skip] Time condition not met: gap = ${(timeGap / 1000 / 60).toFixed(1)} minutes`);
         } else {
           debugLog(`[Skip] Different behavior or author`);
         }
-        mergedHistory.push(this._cleanupOperation(current));
+        mergedHistory.push(current);
         current = operation;
         continue;
       }
@@ -715,38 +741,64 @@ class DocumentSegmentManager {
         if (sentenceCount <= 1) {
           // ✅ 可以合并：仍然是单句话
           current.content = mergedContent;
-          current.end_time = operation.end_time;
-          current.end_timestamp = operation.end_timestamp;
+          
+          if (current.behavior === 'add') {
+            // add 操作：取最小值和最大值
+            const currentStartMs = new Date(current.add_start_time).getTime();
+            const currentEndMs = new Date(current.add_end_time).getTime();
+            const opStartMs = new Date(operation.add_start_time).getTime();
+            const opEndMs = new Date(operation.add_end_time).getTime();
+            
+            const minStartMs = Math.min(currentStartMs, opStartMs);
+            const maxEndMs = Math.max(currentEndMs, opEndMs);
+            
+            current.add_start_time = this.formatHKTime(minStartMs);
+            current.add_end_time = this.formatHKTime(maxEndMs);
+          } else {
+            // deleted 操作：取最小值和最大值
+            const currentDelStartMs = new Date(current.delete_start_time).getTime();
+            const currentDelEndMs = new Date(current.delete_end_time).getTime();
+            const opDelStartMs = new Date(operation.delete_start_time).getTime();
+            const opDelEndMs = new Date(operation.delete_end_time).getTime();
+            
+            const currentAddStartMs = new Date(current.add_start_time).getTime();
+            const currentAddEndMs = new Date(current.add_end_time).getTime();
+            const opAddStartMs = new Date(operation.add_start_time).getTime();
+            const opAddEndMs = new Date(operation.add_end_time).getTime();
+            
+            const minDelStartMs = Math.min(currentDelStartMs, opDelStartMs);
+            const maxDelEndMs = Math.max(currentDelEndMs, opDelEndMs);
+            const minAddStartMs = Math.min(currentAddStartMs, opAddStartMs);
+            const maxAddEndMs = Math.max(currentAddEndMs, opAddEndMs);
+            
+            current.delete_start_time = this.formatHKTime(minDelStartMs);
+            current.delete_end_time = this.formatHKTime(maxDelEndMs);
+            current.add_start_time = this.formatHKTime(minAddStartMs);
+            current.add_end_time = this.formatHKTime(maxAddEndMs);
+          }
+          
           debugLog(`[Merge Success] Merged, total length: ${mergedContent.length}`);
           continue;  // 继续尝试合并下一个片段
         } else {
           // ❌ 不能合并：会变成多句话
           debugLog(`[Merge Skip] Would create ${sentenceCount} sentences, keeping separate`);
-          mergedHistory.push(this._cleanupOperation(current));
+          mergedHistory.push(current);
           current = operation;
         }
       } catch (error) {
         // 句子分割器出错，保守处理：不合并
         console.error(`[Sentence Count Error] ${error.message}, defaulting to no merge`);
-        mergedHistory.push(this._cleanupOperation(current));
+        mergedHistory.push(current);
         current = operation;
       }
     }
     
     // 5. 添加最后一个操作
     if (current) {
-      mergedHistory.push(this._cleanupOperation(current));
+      mergedHistory.push(current);
     }
     
     return mergedHistory;
-  }
-
-  /**
-   * 清理操作对象（移除内部使用的时间戳字段）
-   */
-  _cleanupOperation(operation) {
-    const { start_timestamp, end_timestamp, ...cleaned } = operation;
-    return cleaned;
   }
 
   /**

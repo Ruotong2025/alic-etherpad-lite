@@ -54,10 +54,10 @@ class ChangeTableManager {
         behavior VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '操作类型：add 或 deleted',
         author VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '作者ID',
         content LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '操作内容',
-        add_start_time VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容添加开始时间',
-        add_end_time VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容添加结束时间',
-        delete_start_time VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容删除开始时间',
-        delete_end_time VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容删除结束时间',
+        add_start_time VARCHAR(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容添加开始时间（精确到毫秒）',
+        add_end_time VARCHAR(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容添加结束时间（精确到毫秒）',
+        delete_start_time VARCHAR(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容删除开始时间（精确到毫秒）',
+        delete_end_time VARCHAR(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容删除结束时间（精确到毫秒）',
         PRIMARY KEY (id) USING BTREE,
         INDEX idx_pad_id(pad_id ASC) USING BTREE
       ) COMMENT='Pad版本变更详细记录表（增量更新）' ROW_FORMAT=Dynamic;
@@ -210,34 +210,15 @@ class ChangeExporter {
 
       // 将每个操作转换为变更记录
       operationHistory.forEach((operation, index) => {
-        let add_start_time = null;
-        let add_end_time = null;
-        let delete_start_time = null;
-        let delete_end_time = null;
-        
-        if (operation.behavior === 'add') {
-          // add 操作：start_time 和 end_time 都是添加时间
-          add_start_time = operation.start_time;
-          add_end_time = operation.end_time;
-        } else if (operation.behavior === 'deleted') {
-          // deleted 操作：
-          // - start_time 是内容被添加的时间 → add_start_time, add_end_time
-          // - end_time 是内容被删除的时间 → delete_start_time, delete_end_time
-          add_start_time = operation.start_time;
-          add_end_time = operation.start_time;
-          delete_start_time = operation.end_time;
-          delete_end_time = operation.end_time;
-        }
-        
         allChanges.push({
           pad_id: latestSnapshot.pad_id,
           change_order: index + 1,  // 从1开始
           behavior: operation.behavior,
           author: operation.author,
-          add_start_time: add_start_time,
-          add_end_time: add_end_time,
-          delete_start_time: delete_start_time,
-          delete_end_time: delete_end_time,
+          add_start_time: operation.add_start_time,
+          add_end_time: operation.add_end_time,
+          delete_start_time: operation.delete_start_time,
+          delete_end_time: operation.delete_end_time,
           content: operation.content
         });
       });
