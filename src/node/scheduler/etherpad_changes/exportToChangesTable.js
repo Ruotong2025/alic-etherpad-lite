@@ -215,10 +215,10 @@ class ChangeExporter {
           change_order: index + 1,  // 从1开始
           behavior: operation.behavior,
           author: operation.author,
-          add_start_time: operation.add_start_time,
-          add_end_time: operation.add_end_time,
-          delete_start_time: operation.delete_start_time,
-          delete_end_time: operation.delete_end_time,
+          add_start_time: operation.behavior === 'add' ? operation.start_time : null,
+          add_end_time: operation.behavior === 'add' ? operation.end_time : null,
+          delete_start_time: operation.behavior === 'deleted' ? operation.start_time : null,
+          delete_end_time: operation.behavior === 'deleted' ? operation.end_time : null,
           content: operation.content
         });
       });

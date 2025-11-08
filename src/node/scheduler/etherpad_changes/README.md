@@ -1,288 +1,3 @@
-# Etherpad Changes - Version Tracking System
-
-A comprehensive toolkit for Etherpad version tracking, diff calculation, and change history management.
-
-**Location:** `src/node/scheduler/etherpad_changes/`
-
----
-
-## 📁 Scripts Overview
-
-| Script | Function | Run From | Dependencies |
-|--------|----------|----------|--------------|
-| `PadContentRebuild.js` | Rebuild pad content from store | `src/` directory | Etherpad modules |
-| `PadContentMerge.js` | Merge consecutive edits | Any | settings.json |
-| `generatePadVersionSnapshots.js` | Generate version snapshots | Any | pad_version_contents, Python 3, NLTK |
-| `exportToChangesTable.js` | Export to changes table | Any | pad_version_snapshots |
-| `generatePadChanges.js` 🆕 | One-step changes generation (for comparison) | Any | pad_version_contents, Python 3, NLTK |
-| `compare-changes-tables.js` 🆕 | Compare two changes tables | Any | MySQL |
-| `SentenceSplitter.js` | Node.js wrapper for Python NLTK | N/A (library) | python-shell, sentence_splitter.py |
-| `sentence_splitter.py` | Python NLTK sentence tokenizer | N/A (library) | NLTK |
-
-### 1. `PadContentRebuild.js`
-Rebuilds complete pad content from Etherpad's internal `store:*` data.
-- Creates `pad_version_contents` table
-- Applies changesets sequentially like timeslider
-- Initializes version content data
-
-### 2. `PadContentMerge.js`
-Merges consecutive edits by the same author within short time windows.
-- Creates `pad_version_contents_merge` table
-- Reduces version fragmentation
-- Improves processing performance
-
-### 3. `generatePadVersionSnapshots.js` ⭐ (Compare Mode)
-Core snapshot generation script using `diff-match-patch` algorithm with **NLTK sentence-level merge**.
-
-**Data Flow:**
-- **Data Source**: `pad_version_contents` (original versions)
-- **Target Table**: `pad_version_snapshots` (standard snapshot table)
-
-**Key Features:**
-- ✅ Accurate text diff calculation
-- ✅ Document segment management (normal + deleted)
-- ✅ Operation history tracking (add/deleted)
-- ✅ Hong Kong Time format (UTC+8)
-- ✅ **NLTK-based sentence detection for smart merging**
-- ✅ Python-Node.js integration via `python-shell`
-
-**Merge Logic:**
-When consecutive operations have the same `behavior` and `author`, the system attempts to merge them. However, if the merged content would create **2 or more sentences** (detected by NLTK), the operations are kept separate. This ensures each operation record represents a sentence-level edit.
-
-**Example:**
-```
-Operation 1: "Hello world"        (1 sentence)
-Operation 2: ". How are you?"     (would create 2 sentences)
-Result: NOT merged (kept as separate operations)
-
-Operation 1: "Hello"              (1 sentence)
-Operation 2: " world"             (still 1 sentence)
-Result: MERGED to "Hello world"
-```
-
-**Data Flow:**
-```
-pad_version_contents (原始版本)
-       ↓
-generatePadVersionSnapshots.js
-       ↓
-pad_version_snapshots (标准快照表)
-       ↓
-exportToChangesTable.js
-       ↓
-pad_version_changes (最终变更记录表)
-```
-
-### 4. `SentenceSplitter.js` & `sentence_splitter.py`
-**New library components** for NLTK integration:
-- `SentenceSplitter.js`: Node.js wrapper class that communicates with Python
-- `sentence_splitter.py`: Python script using NLTK for sentence tokenization
-- Supports English, Chinese, and mixed-language text
-- Persistent Python process for performance
-
-**API:**
-```javascript
-const SentenceSplitter = require('./SentenceSplitter');
-const splitter = new SentenceSplitter();
-
-// Count sentences in text
-const count = await splitter.countSentences("Hello world. How are you?");
-console.log(count); // 2
-
-splitter.close(); // Clean up
-```
-
-### 5. `generatePadChanges.js` 🆕 (One-Step Generation)
-Generates change records in one step, combining the functionality of `generatePadVersionSnapshots.js` + `exportToChangesTable.js`.
-
-**⚠️ IMPORTANT:**
-- **Data Source**: `pad_version_contents` (original versions)
-- **Target Table**: `pad_version_changes_compare` (for comparison)
-- **Purpose**: Verify algorithm correctness by comparing with standard two-step process
-
-**Key Features:**
-- ✅ Same diff algorithm as `generatePadVersionSnapshots.js`
-- ✅ Same merge logic (NLTK sentence-level)
-- ✅ Direct output to changes table (no intermediate snapshot table)
-- ✅ Used for validation and comparison
-
-**Usage:**
-```bash
-# Basic usage
-node generatePadChanges.js room-229
-
-# Debug mode
-node generatePadChanges.js room-229 --debug
-```
-
-**Data Flow:**
-```
-pad_version_contents
-    ↓
-[generatePadChanges.js]
-    ↓
-pad_version_changes_compare
-```
-
-### 6. `compare-changes-tables.js` 🆕 (Verification Tool)
-Compares `pad_version_changes` and `pad_version_changes_compare` tables to verify consistency.
-
-**Features:**
-- Compares record counts and statistics
-- Validates reconstructed text
-- Checks individual records
-- Reports differences
-
-**Usage:**
-```bash
-node compare-changes-tables.js room-229
-```
-
-**Typical Workflow:**
-```bash
-# Step 1: Standard two-step process
-node generatePadVersionSnapshots.js room-229
-node exportToChangesTable.js room-229
-
-# Step 2: One-step process
-node generatePadChanges.js room-229
-
-# Step 3: Compare results
-node compare-changes-tables.js room-229
-```
-
-### 7. `exportToChangesTable.js`
-Exports operation history to structured change records.
-- Parses `pad_version_snapshots.deletions_json`
-- Creates `pad_version_changes` table
-- Stores latest version's detailed change records
-
-**Table Schema:**
-```sql
-CREATE TABLE pad_version_changes (
-  id BIGINT AUTO_INCREMENT,
-  pad_id VARCHAR(255),
-  seq_order INT,                    -- Operation sequence
-  behavior VARCHAR(20),              -- 'add' or 'deleted'
-  author VARCHAR(255),               -- Author ID
-  start_time VARCHAR(50),            -- Start time (HK Time)
-  end_time VARCHAR(50),              -- End time (HK Time)
-  content LONGTEXT,                  -- Operation content
-  PRIMARY KEY (id),
-  INDEX idx_pad_id(pad_id)
-);
-```
-
----
-
-## 🔄 Data Flow
-
-### Main Pipeline (Merged Versions)
-```
-Raw Data (store:*)
-    ↓
-[PadContentRebuild.js]
-    ↓
-pad_version_contents
-    ↓
-[PadContentMerge.js]
-    ↓
-pad_version_contents_merge
-    ↓
-[generatePadVersionSnapshots.js] ← Uses NLTK (sentence_splitter.py)
-    ↓
-pad_version_snapshots (with deletions_json)
-    ↓
-[exportToChangesTable.js]
-    ↓
-pad_version_changes
-```
-
-### Comparison Pipeline (Original Versions)
-```
-Raw Data (store:*)
-    ↓
-[PadContentRebuild.js]
-    ↓
-pad_version_contents (原始版本)
-    ↓
-[generatePadVersionSnapshots.js] ← Uses NLTK (sentence_splitter.py)
-    ↓
-pad_version_snapshots (标准快照表)
-    ↓
-[exportToChangesTable.js] ← Parse and flatten operations
-    ↓
-pad_version_changes (最终变更记录表)
-```
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-Before running the scripts, ensure your environment is properly configured:
-
-1. **Python 3.7+** with NLTK installed
-2. **Node.js 14+** with required packages
-3. **MySQL 5.7+** database accessible
-
-**📖 For detailed setup instructions, see [ENVIRONMENT_SETUP.md](./ENVIRONMENT_SETUP.md)**
-
-Quick setup:
-```bash
-# Install Python dependencies
-pip3 install -r requirements.txt
-python3 -c "import nltk; nltk.download('punkt')"
-
-# Install Node.js dependencies
-cd d:\ALIC\alic-etherpad-lite
-pnpm add python-shell diff-match-patch
-
-# Test NLTK integration
-cd src/node/scheduler/etherpad_changes
-node test-sentence-splitter.js
-```
-
-### Option 1: Compare Pipeline (Original Versions)
-
-```bash
-# Step 1: Rebuild pad content (if not already done)
-cd d:\ALIC\alic-etherpad-lite\src
-node --require tsx/cjs node/scheduler/etherpad_changes/PadContentRebuild.js room-229
-
-# Step 2: Generate snapshots from original versions
-cd node/scheduler/etherpad_changes
-node generatePadVersionSnapshots.js room-229
-# → Outputs to pad_version_snapshots
-
-# Step 3: Export to changes table
-node exportToChangesTable.js room-229
-# → Outputs to pad_version_changes
-```
-
-### Option 2: Update Only (Existing Data)
-
-```bash
-cd d:\ALIC\alic-etherpad-lite\src\node\scheduler\etherpad_changes
-
-# Regenerate snapshots (with NLTK)
-node generatePadVersionSnapshots.js room-229
-
-# Update changes table
-node exportToChangesTable.js room-229
-```
-
-### Option 3: Test NLTK Integration
-
-```bash
-# Test sentence splitter
-cd d:\ALIC\alic-etherpad-lite\src\node\scheduler\etherpad_changes
-node test-sentence-splitter.js
-```
-
----
-
 ## 📊 SQL Queries
 
 ⚠️ **Important:** Set this before running queries to avoid truncation:
@@ -322,68 +37,235 @@ WHERE pad_id = 'room-229'
 GROUP BY pad_id;
 ```
 
-Complete SQL queries: `C:\Users\Lenovo\Desktop\pad_version_changes_queries.sql`
+### 原理介绍
+====================================================================================================
+📚 segments 数组的文档位置顺序原理
+====================================================================================================
+
+## 核心原理
+
+segments 数组的顺序 = **文档中文本出现的从左到右的顺序**
+
+这个顺序是通过 **插入位置（position）** 来维护的。
 
 ---
 
-## 🔧 Configuration
+## 详细说明
 
-Database config (in each script):
+### 1️⃣ 初始化（版本0）
+
 ```javascript
-const DB_CONFIG = {
-  host: '112.74.92.135',
-  user: 'root',
-  password: '1q2w3e4R',
-  database: 'alic',
-  charset: 'utf8mb4',
-  port: 3306
-};
+initialize(text, authorId, timestamp) {
+  this.segments = [{
+    type: 'normal',
+    content: text,  // 整个文档作为一个片段
+    version: 0,
+    author: authorId,
+    timestamp: timestamp
+  }];
+}
 ```
 
-### Path Notes
-After moving to subfolder, paths have been updated:
-- ✅ **PadContentMerge.js**: `settings.json` → `../../../../settings.json`
-- ✅ **PadContentRebuild.js**: Uses `ep_etherpad-lite` modules (no change needed)
-- ✅ **Other scripts**: Use independent DB config (no change needed)
+**示例：**
+文档内容: "Hello World"
+
+segments = [
+{ type: 'normal', content: 'Hello World', version: 0 }
+]
 
 ---
 
-## ⚠️ Important Notes
+### 2️⃣ 插入操作（_applyInsertion）
 
-1. **PadContentRebuild.js** must run from `src/` directory (requires Etherpad modules)
-2. Other scripts can run from any location (independent DB connections)
-3. Execution order must follow data flow pipeline
-4. All timestamps converted to Hong Kong Time (UTC+8)
-5. Uses utf8mb4 encoding for emoji support
-6. **GROUP_CONCAT limit**: MySQL default is 1024 bytes - must manually adjust
+**关键：position 是在 normal 文本中的位置（从左到右计数）**
+
+```javascript
+_applyInsertion(position, content, version, authorId, timestamp) {
+  let currentPos = 0;
+
+  // 遍历所有片段，找到插入位置
+  for (let i = 0; i < this.segments.length; i++) {
+    const segment = this.segments[i];
+
+    // 只计算 normal 片段的位置
+    if (segment.type !== 'normal') {
+      continue;  // 跳过 deleted 片段
+    }
+
+    const segmentEndPos = currentPos + segment.content.length;
+
+    if (position === currentPos) {
+      // 在片段开头插入 → splice(i, 0, newSegment)
+      this.segments.splice(i, 0, newSegment);
+      return;
+    } else if (position > currentPos && position < segmentEndPos) {
+      // 在片段中间插入 → 分割成 [before, new, after]
+      this.segments.splice(i, 1, beforeSegment, newSegment, afterSegment);
+      return;
+    }
+
+    currentPos = segmentEndPos;
+  }
+
+  // 如果位置 = 总长度，追加到末尾
+  if (position === totalNormalLength) {
+    this.segments.push(newSegment);
+  }
+}
+```
+
+**示例：在位置6插入 " Beautiful"**
+
+原文档: "Hello World"
+position = 6（在 "World" 前）
+
+操作：
+1. currentPos = 0
+2. 检查片段0: "Hello World"
+  - segmentEndPos = 11
+  - position (6) > currentPos (0) && position (6) < segmentEndPos (11)
+  - **在片段中间插入！**
+3. 分割：
+  - before = "Hello " (0-6)
+  - new = " Beautiful" (插入内容)
+  - after = "World" (6-11)
+
+结果 segments = [
+{ type: 'normal', content: 'Hello ', version: 0 },
+{ type: 'normal', content: ' Beautiful', version: 1 },  ← 新插入
+{ type: 'normal', content: 'World', version: 0 }
+]
+
+**文档顺序：从左到右 = "Hello " + " Beautiful" + "World" = "Hello  Beautiful World"**
 
 ---
 
-## 🐛 Troubleshooting
+### 3️⃣ 删除操作（_applyDeletion）
 
-### Path Verification
-```bash
-cd d:\ALIC\alic-etherpad-lite\src\node\scheduler\etherpad_changes
-node -p "require('path').resolve(__dirname, '../../../../settings.json')"
-# Should output: D:\ALIC\alic-etherpad-lite\settings.json
+**关键：删除不改变 segments 的顺序，只改变 type**
+
+```javascript
+_applyDeletion(position, length, version, authorId, timestamp) {
+  let currentPos = 0;
+
+  for (let i = 0; i < this.segments.length; i++) {
+    const segment = this.segments[i];
+
+    // 只计算 normal 片段的位置
+    if (segment.type !== 'normal') {
+      continue;
+    }
+
+    const segmentStart = currentPos;
+    const segmentEnd = currentPos + segment.content.length;
+
+    // 计算删除范围与片段的交集
+    if (有交集) {
+      if (删除整个片段) {
+        // 标记为 deleted，但保持在原位置
+        segment.type = 'deleted';
+        segment.deletedAt = version;
+      } else if (删除部分) {
+        // 分割成 [保留部分, 删除部分]
+        this.segments.splice(i, 1, keepSegment, deletedSegment);
+      }
+    }
+
+    currentPos = segmentEnd;
+  }
+}
 ```
 
-### Debug Mode
-```bash
-node generatePadVersionSnapshotsV3.js --debug
-```
+**示例：删除位置6-16（" Beautiful"）**
 
-### Common Issues
-- **Cannot find settings.json**: Check path is `../../../../settings.json` (4 levels up)
-- **Module not found**: `PadContentRebuild.js` must run from `src/` directory
-- **GROUP_CONCAT truncation**: Run `SET SESSION group_concat_max_len = 10485760;` first
+原文档: "Hello  Beautiful World"
+删除范围: [6, 16)
+
+操作：
+1. 检查片段0: "Hello " (位置0-6)
+  - 删除范围在片段之后，继续
+2. 检查片段1: " Beautiful" (位置6-16)
+  - 删除范围完全覆盖！
+  - **标记为 deleted**
+3. 检查片段2: "World" (位置16-21)
+  - 删除范围在片段之前，结束
+
+结果 segments = [
+{ type: 'normal', content: 'Hello ', version: 0 },
+{ type: 'deleted', content: ' Beautiful', version: 1, deletedAt: 2 },  ← 标记为删除
+{ type: 'normal', content: 'World', version: 0 }
+]
+
+**注意：deleted 片段仍然保持在原位置！**
 
 ---
 
-## 📅 Changelog
+### 4️⃣ 复杂示例：多次编辑
 
-- **2025-10-26**: Fixed GROUP_CONCAT truncation issue
-- **2025-10-26**: Removed revision field, store latest version only
-- **2025-10-26**: Fixed Version 5 deletion marker placement
-- **2025-10-26**: Integrated diff-match-patch algorithm
-- **2025-10-24**: Initial version created
+**版本0:** "ABC"
+segments = [
+{ type: 'normal', content: 'ABC', version: 0 }
+]
+
+**版本1:** 在位置1插入 "X"
+position = 1（在 'B' 前）
+结果: "AXBC"
+segments = [
+{ type: 'normal', content: 'A', version: 0 },
+{ type: 'normal', content: 'X', version: 1 },  ← 插入到位置1
+{ type: 'normal', content: 'BC', version: 0 }
+]
+
+**版本2:** 在位置3插入 "Y"
+position = 3（在 'C' 前）
+结果: "AXYBC"
+
+计算位置：
+- 片段0 'A': currentPos = 0, endPos = 1
+- 片段1 'X': currentPos = 1, endPos = 2
+- 片段2 'BC': currentPos = 2, endPos = 4
+  - position (3) 在这个片段中间！
+  - 分割: 'B' + 'Y' + 'C'
+
+segments = [
+{ type: 'normal', content: 'A', version: 0 },
+{ type: 'normal', content: 'X', version: 1 },
+{ type: 'normal', content: 'B', version: 0 },
+{ type: 'normal', content: 'Y', version: 2 },  ← 插入到位置3
+{ type: 'normal', content: 'C', version: 0 }
+]
+
+**版本3:** 删除位置1-3（"XB"）
+结果: "AYC"
+
+segments = [
+{ type: 'normal', content: 'A', version: 0 },
+{ type: 'deleted', content: 'X', version: 1, deletedAt: 3 },  ← 标记删除，保持位置
+{ type: 'deleted', content: 'B', version: 0, deletedAt: 3 },  ← 标记删除，保持位置
+{ type: 'normal', content: 'Y', version: 2 },
+{ type: 'normal', content: 'C', version: 0 }
+]
+
+**文档位置顺序 = 数组顺序 = 从左到右的文本顺序**
+
+---
+
+## ✅ 总结
+
+**segments 数组的顺序由以下因素决定：**
+
+1. **初始顺序**：版本0的文本从左到右
+2. **插入操作**：
+  - 根据 position 找到插入点
+  - 使用 splice() 在正确的索引位置插入
+  - 如果在片段中间，分割成 [before, new, after]
+3. **删除操作**：
+  - 不改变数组顺序
+  - 只改变 type 为 'deleted'
+  - deleted 片段保持在原位置
+
+**关键点：**
+- position 始终是在 **normal 文本** 中的位置（跳过 deleted 片段）
+- segments 数组的顺序 = **文档中文本的从左到右顺序**
+- 这个顺序在整个编辑过程中保持一致
+
