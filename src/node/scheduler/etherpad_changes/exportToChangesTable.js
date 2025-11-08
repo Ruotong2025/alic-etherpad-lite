@@ -210,15 +210,34 @@ class ChangeExporter {
 
       // 将每个操作转换为变更记录
       operationHistory.forEach((operation, index) => {
+        let add_start_time = null;
+        let add_end_time = null;
+        let delete_start_time = null;
+        let delete_end_time = null;
+        
+        if (operation.behavior === 'add') {
+          // add 操作：start_time 和 end_time 都是添加时间
+          add_start_time = operation.start_time;
+          add_end_time = operation.end_time;
+        } else if (operation.behavior === 'deleted') {
+          // deleted 操作：
+          // - start_time 是内容被添加的时间 → add_start_time, add_end_time
+          // - end_time 是内容被删除的时间 → delete_start_time, delete_end_time
+          add_start_time = operation.start_time;
+          add_end_time = operation.start_time;
+          delete_start_time = operation.end_time;
+          delete_end_time = operation.end_time;
+        }
+        
         allChanges.push({
           pad_id: latestSnapshot.pad_id,
           change_order: index + 1,  // 从1开始
           behavior: operation.behavior,
           author: operation.author,
-          add_start_time: operation.behavior === 'add' ? operation.start_time : null,
-          add_end_time: operation.behavior === 'add' ? operation.end_time : null,
-          delete_start_time: operation.behavior === 'deleted' ? operation.start_time : null,
-          delete_end_time: operation.behavior === 'deleted' ? operation.end_time : null,
+          add_start_time: add_start_time,
+          add_end_time: add_end_time,
+          delete_start_time: delete_start_time,
+          delete_end_time: delete_end_time,
           content: operation.content
         });
       });
