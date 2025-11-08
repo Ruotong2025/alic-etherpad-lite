@@ -472,6 +472,23 @@ class DocumentSegmentManager {
         );
         debugLog(`    在片段 ${i} 中间插入（偏移 ${offset}）`);
         return;
+      } else if (position === segmentEndPos) {
+        // ✅ 修复：在片段末尾插入
+        // 应该插入到下一个 normal 片段之前（跳过紧随的 deleted 片段）
+        let insertIndex = i + 1;
+        while (insertIndex < this.segments.length && this.segments[insertIndex].type === 'deleted') {
+          insertIndex++;
+        }
+        
+        this.segments.splice(insertIndex, 0, {
+          type: 'normal',
+          content: content,
+          version: version,
+          author: authorId,
+          timestamp: timestamp
+        });
+        debugLog(`    在片段 ${i} 末尾插入（索引 ${insertIndex}，跳过了 ${insertIndex - i - 1} 个 deleted 片段）`);
+        return;
       }
       
       currentPos = segmentEndPos;
@@ -586,19 +603,122 @@ class DocumentSegmentManager {
   }
 
   /**
+   * 获取片段的版本号（用于排序）
+   */
+  _getVersion(segment) {
+    return segment.type === 'deleted' ? segment.deletedAt : segment.version;
+  }
+
+  /**
+   * 获取片段的时间戳
+   */
+  _getTimestamp(segment) {
+    return segment.type === 'deleted' ? segment.deletedTimestamp : segment.timestamp;
+  }
+
+  /**
+   * 将 segments 分成多个编辑区域
+   * 
+   * @param {Array} segments - 片段数组
+   * @param {number} versionGap - 版本号差距阈值（默认5）
+   * @param {number} timeGap - 时间差距阈值（默认10分钟）
+   * @returns {Array<Object>} 区域数组
+   */
+  _splitIntoRegions(segments, versionGap = 5, timeGap = 600000) {
+    if (segments.length === 0) return [];
+    
+    const regions = [];
+    let currentRegion = {
+      segments: [segments[0]],
+      minVersion: this._getVersion(segments[0]),
+      maxVersion: this._getVersion(segments[0]),
+      startIndex: 0
+    };
+    
+    for (let i = 1; i < segments.length; i++) {
+      const segment = segments[i];
+      const version = this._getVersion(segment);
+      const prevSegment = segments[i - 1];
+      const prevVersion = this._getVersion(prevSegment);
+      
+      // 计算版本号差距
+      const versionDiff = Math.abs(version - prevVersion);
+      
+      // 计算时间差距
+      const timestamp = this._getTimestamp(segment);
+      const prevTimestamp = this._getTimestamp(prevSegment);
+      const timeDiff = Math.abs(timestamp - prevTimestamp);
+      
+      // 判断是否应该开始新区域
+      const shouldSplit = (
+        versionDiff > versionGap ||  // 版本跳跃太大
+        timeDiff > timeGap ||        // 时间间隔太长
+        version < currentRegion.minVersion - versionGap  // 版本倒退太多
+      );
+      
+      if (shouldSplit) {
+        // 保存当前区域
+        regions.push(currentRegion);
+        // 开始新区域
+        currentRegion = {
+          segments: [segment],
+          minVersion: version,
+          maxVersion: version,
+          startIndex: i
+        };
+      } else {
+        // 加入当前区域
+        currentRegion.segments.push(segment);
+        currentRegion.minVersion = Math.min(currentRegion.minVersion, version);
+        currentRegion.maxVersion = Math.max(currentRegion.maxVersion, version);
+      }
+    }
+    
+    // 保存最后一个区域
+    if (currentRegion.segments.length > 0) {
+      regions.push(currentRegion);
+    }
+    
+    return regions;
+  }
+
+  /**
+   * 在区域内按版本号排序
+   */
+  _sortRegionByVersion(region) {
+    region.segments.sort((a, b) => {
+      const versionA = this._getVersion(a);
+      const versionB = this._getVersion(b);
+      
+      // 首先按版本号
+      if (versionA !== versionB) {
+        return versionA - versionB;
+      }
+      
+      // 同版本：deleted 在 add 之前
+      if (a.type !== b.type) {
+        return a.type === 'deleted' ? -1 : 1;
+      }
+      
+      // 同版本同类型：保持原顺序
+      return 0;
+    });
+  }
+
+  /**
    * 构建操作历史并智能合并（一步完成）
+   * 
+   * 策略：位置优先 + 区域内按时间排序
+   * 1. 将 segments 分成多个编辑区域（版本号和时间相近）
+   * 2. 每个区域内按版本号排序（同版本deleted在前）
+   * 3. 保持区域之间的原始顺序
+   * 4. 合并相邻的同类操作
    * 
    * 合并条件：
    * 1. behavior 相同（都是 add 或 deleted）
    * 2. author 相同
-   * 3. 时间间隔 ≤ 1小时（3600秒 = 3600000毫秒）
+   * 3. 时间间隔 ≤ 1小时
    * 4. 合并后仍是单句话（≤ 1句）
-   * 
-   * 采用逐步合并策略：
-   * - 每次只尝试合并当前操作和下一个操作
-   * - 如果可以合并，继续尝试下一个
-   * - 如果不能合并，保存当前操作，开始新的合并
-   * - 这样可以保留完整的时间信息，不会丢失可合并的片段
    */
   async buildAndMergeOperationHistory() {
     if (this.segments.length === 0) return [];
@@ -606,130 +726,146 @@ class DocumentSegmentManager {
     // 初始化句子分割器
     this.initSentenceSplitter();
     
-    const TIME_THRESHOLD = 3600000;  // 1小时 = 3600秒 = 3600000毫秒
-    const mergedHistory = [];
+    const TIME_THRESHOLD = 3600000;  // 1小时 = 3600000毫秒
+    
+    // 1. 分区域
+    const regions = this._splitIntoRegions(this.segments);
+    
+    debugLog(`\n📦 分成 ${regions.length} 个编辑区域:`);
+    regions.forEach((region, i) => {
+      debugLog(`  区域${i + 1}: ${region.segments.length}个片段, 版本${region.minVersion}-${region.maxVersion}`);
+    });
+    
+    // 2. 按区域的最小版本号排序区域
+    regions.sort((a, b) => a.minVersion - b.minVersion);
+    
+    // 3. 每个区域内排序
+    for (const region of regions) {
+      this._sortRegionByVersion(region);
+    }
+    
+    // 4. 收集所有操作
+    const allOperations = [];
     let current = null;
     
-    for (const segment of this.segments) {
-      // 1. 构建当前片段的操作对象
-      let operation = null;
-      
-      if (segment.type === 'normal') {
-        operation = {
-          behavior: 'add',
-          author: segment.author || '',
-          add_start_time: this.formatHKTime(segment.timestamp),
-          add_end_time: this.formatHKTime(segment.timestamp),
-          add_start_timestamp: segment.timestamp,  // 保留原始时间戳用于计算
-          add_end_timestamp: segment.timestamp,
-          delete_start_time: null,
-          delete_end_time: null,
-          delete_start_timestamp: null,
-          delete_end_timestamp: null,
-          content: segment.content
-        };
-      } else if (segment.type === 'deleted') {
-        operation = {
-          behavior: 'deleted',
-          author: segment.deletedAuthor || segment.author || '',
-          add_start_time: segment.timestamp ? this.formatHKTime(segment.timestamp) : null,
-          add_end_time: segment.timestamp ? this.formatHKTime(segment.timestamp) : null,
-          add_start_timestamp: segment.timestamp || null,
-          add_end_timestamp: segment.timestamp || null,
-          delete_start_time: this.formatHKTime(segment.deletedTimestamp),
-          delete_end_time: this.formatHKTime(segment.deletedTimestamp),
-          delete_start_timestamp: segment.deletedTimestamp,
-          delete_end_timestamp: segment.deletedTimestamp,
-          content: segment.content
-        };
-      }
-      
-      if (!operation) continue;
-      
-      // 2. 如果是第一个操作，直接设为 current
-      if (!current) {
-        current = operation;
-        continue;
-      }
-      
-      // 3. 检查基本合并条件
-      let timeSpan = 0;
-      
-      if (current.behavior === 'add') {
-        // add 操作：|下一个.add_end_timestamp - 当前.add_start_timestamp|
-        timeSpan = Math.abs(operation.add_end_timestamp - current.add_start_timestamp);
-      } else if (current.behavior === 'deleted') {
-        // deleted 操作：|下一个.delete_end_timestamp - 当前.delete_start_timestamp|
-        timeSpan = Math.abs(operation.delete_end_timestamp - current.delete_start_timestamp);
-      }
-      
-      const canMergeBasic = (
-        current.behavior === operation.behavior && 
-        current.author === operation.author &&
-        timeSpan <= TIME_THRESHOLD
-      );
-      
-      if (!canMergeBasic) {
-        // 基本条件不满足，不合并
-        if (timeSpan > TIME_THRESHOLD) {
-          debugLog(`[Skip] Time span too large: ${(timeSpan / 1000 / 60).toFixed(1)} minutes`);
-        } else {
-          debugLog(`[Skip] Different behavior or author`);
+    for (const region of regions) {
+      for (const segment of region.segments) {
+        // 构建当前片段的操作对象
+        let operation = null;
+        
+        if (segment.type === 'normal') {
+          operation = {
+            behavior: 'add',
+            author: segment.author || '',
+            add_start_time: this.formatHKTime(segment.timestamp),
+            add_end_time: this.formatHKTime(segment.timestamp),
+            add_start_timestamp: segment.timestamp,  // 保留原始时间戳用于计算
+            add_end_timestamp: segment.timestamp,
+            delete_start_time: null,
+            delete_end_time: null,
+            delete_start_timestamp: null,
+            delete_end_timestamp: null,
+            content: segment.content
+          };
+        } else if (segment.type === 'deleted') {
+          operation = {
+            behavior: 'deleted',
+            author: segment.deletedAuthor || segment.author || '',
+            add_start_time: segment.timestamp ? this.formatHKTime(segment.timestamp) : null,
+            add_end_time: segment.timestamp ? this.formatHKTime(segment.timestamp) : null,
+            add_start_timestamp: segment.timestamp || null,
+            add_end_timestamp: segment.timestamp || null,
+            delete_start_time: this.formatHKTime(segment.deletedTimestamp),
+            delete_end_time: this.formatHKTime(segment.deletedTimestamp),
+            delete_start_timestamp: segment.deletedTimestamp,
+            delete_end_timestamp: segment.deletedTimestamp,
+            content: segment.content
+          };
         }
-        mergedHistory.push(this._cleanupOperation(current));
-        current = operation;
-        continue;
-      }
-      
-      // 4. 基本条件满足，检查句子级别约束
-      const mergedContent = current.content + operation.content;
-      
-      try {
-        const sentenceCount = await this.sentenceSplitter.countSentences(mergedContent);
         
-        debugLog(`[Merge Check] Content: "${mergedContent.substring(0, 50)}...", Sentences: ${sentenceCount}, Time span: ${(timeSpan / 1000).toFixed(1)}s`);
+        if (!operation) continue;
         
-        if (sentenceCount <= 1) {
-          // ✅ 可以合并：仍然是单句话
-          current.content = mergedContent;
+        // 如果是第一个操作，直接设为 current
+        if (!current) {
+          current = operation;
+          continue;
+        }
+        
+        // 检查基本合并条件
+        let timeSpan = 0;
+        
+        if (current.behavior === 'add') {
+          timeSpan = Math.abs(operation.add_end_timestamp - current.add_start_timestamp);
+        } else if (current.behavior === 'deleted') {
+          timeSpan = Math.abs(operation.delete_end_timestamp - current.delete_start_timestamp);
+        }
+        
+        const canMergeBasic = (
+          current.behavior === operation.behavior && 
+          current.author === operation.author &&
+          timeSpan <= TIME_THRESHOLD
+        );
+        
+        if (!canMergeBasic) {
+          // 基本条件不满足，不合并
+          if (timeSpan > TIME_THRESHOLD) {
+            debugLog(`[Skip] Time span too large: ${(timeSpan / 1000 / 60).toFixed(1)} minutes`);
+          } else {
+            debugLog(`[Skip] Different behavior or author`);
+          }
+          allOperations.push(this._cleanupOperation(current));
+          current = operation;
+          continue;
+        }
+        
+        // 基本条件满足，检查句子级别约束
+        const mergedContent = current.content + operation.content;
+        
+        try {
+          const sentenceCount = await this.sentenceSplitter.countSentences(mergedContent);
           
-          // 更新时间：取最早的 start 和最晚的 end
-          if (current.behavior === 'add') {
-            // add 操作：保留 add_start，更新 add_end
-            current.add_end_time = operation.add_end_time;
-            current.add_end_timestamp = operation.add_end_timestamp;
-          } else if (current.behavior === 'deleted') {
-            // deleted 操作：更新 add_end 和 delete_end
-            if (operation.add_end_time) {
+          debugLog(`[Merge Check] Content: "${mergedContent.substring(0, 50)}...", Sentences: ${sentenceCount}, Time span: ${(timeSpan / 1000).toFixed(1)}s`);
+          
+          if (sentenceCount <= 1) {
+            // ✅ 可以合并：仍然是单句话
+            current.content = mergedContent;
+            
+            // 更新时间：取最早的 start 和最晚的 end
+            if (current.behavior === 'add') {
               current.add_end_time = operation.add_end_time;
               current.add_end_timestamp = operation.add_end_timestamp;
+            } else if (current.behavior === 'deleted') {
+              if (operation.add_end_time) {
+                current.add_end_time = operation.add_end_time;
+                current.add_end_timestamp = operation.add_end_timestamp;
+              }
+              current.delete_end_time = operation.delete_end_time;
+              current.delete_end_timestamp = operation.delete_end_timestamp;
             }
-            current.delete_end_time = operation.delete_end_time;
-            current.delete_end_timestamp = operation.delete_end_timestamp;
+            
+            debugLog(`[Merge Success] Merged, total length: ${mergedContent.length}`);
+            continue;  // 继续尝试合并下一个片段
+          } else {
+            // ❌ 不能合并：会变成多句话
+            debugLog(`[Merge Skip] Would create ${sentenceCount} sentences, keeping separate`);
+            allOperations.push(this._cleanupOperation(current));
+            current = operation;
           }
-          
-          debugLog(`[Merge Success] Merged, total length: ${mergedContent.length}`);
-          continue;  // 继续尝试合并下一个片段
-        } else {
-          // ❌ 不能合并：会变成多句话
-          debugLog(`[Merge Skip] Would create ${sentenceCount} sentences, keeping separate`);
-          mergedHistory.push(this._cleanupOperation(current));
+        } catch (error) {
+          // 句子分割器出错，保守处理：不合并
+          console.error(`[Sentence Count Error] ${error.message}, defaulting to no merge`);
+          allOperations.push(this._cleanupOperation(current));
           current = operation;
         }
-      } catch (error) {
-        // 句子分割器出错，保守处理：不合并
-        console.error(`[Sentence Count Error] ${error.message}, defaulting to no merge`);
-        mergedHistory.push(this._cleanupOperation(current));
-        current = operation;
       }
     }
     
     // 5. 添加最后一个操作
     if (current) {
-      mergedHistory.push(this._cleanupOperation(current));
+      allOperations.push(this._cleanupOperation(current));
     }
     
-    return mergedHistory;
+    return allOperations;
   }
 
   /**
