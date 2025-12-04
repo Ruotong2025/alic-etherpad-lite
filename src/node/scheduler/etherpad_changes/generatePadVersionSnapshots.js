@@ -891,23 +891,37 @@ class DatabaseManager {
     }
   }
 
+  /**
+   * 格式化时间戳为香港时间（UTC+8）
+   * 格式：YYYY-MM-DD HH:mm:ss.SSS
+   */
+  formatHKTime(timestamp) {
+    if (!timestamp) return '';
+    
+    const date = new Date(timestamp);
+    const pad = (n) => String(n).padStart(2, '0');
+    const padMs = (n) => String(n).padStart(3, '0');
+    
+    // 转换为香港时间（UTC+8）
+    const hkDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+    
+    return `${hkDate.getUTCFullYear()}-${pad(hkDate.getUTCMonth() + 1)}-${pad(hkDate.getUTCDate())} ` +
+      `${pad(hkDate.getUTCHours())}:${pad(hkDate.getUTCMinutes())}:${pad(hkDate.getUTCSeconds())}.${padMs(hkDate.getUTCMilliseconds())}`;
+  }
+
   async createSnapshotTable() {
     const createTableSQL = `
       CREATE TABLE IF NOT EXISTS pad_version_snapshots (
-        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-        pad_id VARCHAR(255) NOT NULL,
+        pad_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
         revision INT NOT NULL,
-        snapshot_text LONGTEXT NOT NULL,
-        pure_text LONGTEXT NOT NULL,
-        author_id VARCHAR(255) DEFAULT '',
-        timestamp BIGINT NOT NULL,
-        deletion_count INT DEFAULT 0,
-        deletions_json JSON,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        formatted_timestamp VARCHAR(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '格式化时间戳（香港时区，格式：YYYY-MM-DD HH:mm:ss.SSS）',
+        deletions_json JSON COMMENT '操作历史JSON',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
         
-        UNIQUE KEY unique_pad_revision (pad_id, revision),
+        PRIMARY KEY (pad_id, revision),
         INDEX idx_pad_id (pad_id),
-        INDEX idx_revision (revision)
+        INDEX idx_revision (revision),
+        INDEX idx_formatted_timestamp (formatted_timestamp)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `;
 
@@ -938,18 +952,14 @@ class DatabaseManager {
   async insertSnapshot(snapshot) {
     const query = `
       INSERT INTO pad_version_snapshots 
-      (pad_id, revision, snapshot_text, pure_text, author_id, timestamp, deletion_count, deletions_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (pad_id, revision, formatted_timestamp, deletions_json)
+      VALUES (?, ?, ?, ?)
     `;
     
     await this.connection.execute(query, [
       snapshot.pad_id,
       snapshot.revision,
-      snapshot.snapshot_text,
-      snapshot.pure_text,
-      snapshot.author_id,
-      snapshot.timestamp,
-      snapshot.deletion_count,
+      snapshot.formatted_timestamp,
       JSON.stringify(snapshot.operation_history)  // 使用 operation_history 替代 deletions
     ]);
   }
@@ -1041,11 +1051,7 @@ class PadSnapshotGeneratorV3 {
       snapshots.push({
         pad_id: padId,
         revision: versions[0].revision,
-        snapshot_text: firstSnapshot.snapshot,
-        pure_text: firstSnapshot.pureText,
-        author_id: firstAuthorId,
-        timestamp: firstTimestamp,
-        deletion_count: firstSnapshot.operationHistory.filter(op => op.behavior === 'deleted').length,
+        formatted_timestamp: this.db.formatHKTime(firstTimestamp),
         operation_history: firstSnapshot.operationHistory
       });
 
@@ -1083,11 +1089,7 @@ class PadSnapshotGeneratorV3 {
         snapshots.push({
           pad_id: padId,
           revision: currVersion.revision,
-          snapshot_text: result.snapshot,
-          pure_text: result.pureText,
-          author_id: currVersion.author_id || '',
-          timestamp: currVersion.timestamp || Date.now(),
-          deletion_count: result.operationHistory.filter(op => op.behavior === 'deleted').length,
+          formatted_timestamp: this.db.formatHKTime(currVersion.timestamp || Date.now()),
           operation_history: result.operationHistory
         });
       }
@@ -1101,7 +1103,8 @@ class PadSnapshotGeneratorV3 {
       console.log(`${'='.repeat(70)}`);
       console.log(`Pad ID: ${padId}`);
       console.log(`总版本数: ${versions.length}`);
-      console.log(`累积删除次数: ${snapshots[snapshots.length - 1].deletion_count}`);
+      const totalDeletions = snapshots[snapshots.length - 1].operation_history.filter(op => op.behavior === 'deleted').length;
+      console.log(`累积删除操作数: ${totalDeletions}`);
       console.log(`验证错误数: ${this.validationErrors.length}`);
       
       if (this.validationErrors.length > 0) {
