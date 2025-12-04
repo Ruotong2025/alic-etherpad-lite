@@ -1,44 +1,69 @@
 #!/usr/bin/env node
 
 /**
- * Pad 版本变更记录生成工具（合并版 - 使用临时表）
+ * Pad 版本变更记录生成工具（完整流程 - 合并版）
  * 
  * 功能流程：
- * 1. 从 pad_version_contents 读取版本数据
- * 2. 生成版本快照到临时表 pad_version_snapshots_temp
- * 3. 解析临时表的 deletions_json 并导出到 pad_version_changes_compare
- * 4. 删除临时表
+ * 1. 基于 Etherpad Changeset 重建 Pad 所有版本内容到临时表 pad_version_contents_temp
+ * 2. 从 pad_version_contents_temp 读取版本数据
+ * 3. 生成版本快照到临时表 pad_version_snapshots_temp
+ * 4. 解析临时表的 deletions_json 并导出到 pad_version_changes_compare
+ * 5. 删除所有临时表
  * 
  * 核心改进：
+ * - 直接从 Etherpad store 重建版本内容（与 PadContentRebuild.js 逻辑完全一致）
  * - 使用 google-diff-match-patch 库进行精确的文本差异计算
  * - 增加快照验证机制，确保删除标记后与当前版本一致
  * - 添加详细的调试日志
  * - 集成 NLTK 句子级别合并判断
  * - 统一合并逻辑：移除片段级合并，只在构建操作历史时合并一次
+ * - 所有中间数据使用临时表，自动清理
  * 
- * 使用方法: node generatePadChanges.js <padId> [--debug]
+ * 使用方法: 
+ *   cd src && node --require tsx/cjs node/scheduler/etherpad_changes/generatePadChanges.js <padId> [--debug]
  * 
  * 示例:
- *   node generatePadChanges.js room-229
- *   node generatePadChanges.js room-229 --debug
+ *   cd src && node --require tsx/cjs node/scheduler/etherpad_changes/generatePadChanges.js room-229
+ *   cd src && node --require tsx/cjs node/scheduler/etherpad_changes/generatePadChanges.js room-229 --debug
+ * 
+ * 注意：
+ *   - pad_version_changes_compare 表结构与 pad_version_changes 完全一致
+ *   - 只导出最新版本的操作历史，用于数据对比验证
  */
 
-const mysql = require('mysql2/promise');
-const path = require('path');
-const DiffMatchPatch = require('diff-match-patch');
+'use strict';
 
-// 数据库配置
-const DB_CONFIG = {
-  host: process.env.DB_HOST || '112.74.92.135',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '1q2w3e4R',
-  database: process.env.DB_NAME || 'alic',
-  charset: 'utf8mb4',
-  port: process.env.DB_PORT || 3306
-};
+// As of v14, Node.js does not exit when there is an unhandled Promise rejection. Convert an
+// unhandled rejection into an uncaught exception, which does cause Node.js to exit.
+process.on('unhandledRejection', (err) => { throw err; });
+
+// Import required modules
+const db = require('ep_etherpad-lite/node/db/DB');
+const padManager = require('ep_etherpad-lite/node/db/PadManager');
+const Changeset = require('ep_etherpad-lite/static/js/Changeset');
+const mysql = require('mysql2/promise');
+const settings = require('ep_etherpad-lite/node/utils/Settings');
+const DiffMatchPatch = require('diff-match-patch');
 
 // 调试模式
 let DEBUG_MODE = false;
+
+/**
+ * 格式化时间戳为香港时间 YYYY-MM-DD HH:mm:ss.SSS
+ */
+function formatHKTime(timestamp) {
+  if (!timestamp) return '';
+  
+  const date = new Date(timestamp);
+  const pad = (n) => String(n).padStart(2, '0');
+  const padMs = (n) => String(n).padStart(3, '0');
+  
+  // 转换为香港时间（UTC+8）
+  const hkDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+  
+  return `${hkDate.getUTCFullYear()}-${pad(hkDate.getUTCMonth() + 1)}-${pad(hkDate.getUTCDate())} ` +
+    `${pad(hkDate.getUTCHours())}:${pad(hkDate.getUTCMinutes())}:${pad(hkDate.getUTCSeconds())}.${padMs(hkDate.getUTCMilliseconds())}`;
+}
 
 /**
  * 调试日志
@@ -644,7 +669,7 @@ class SnapshotBuilderV3 {
     
     if (operations.length > 0) {
       this.docManager.applyChanges(operations, version, authorId, timestamp);
-    } else {
+      } else {
       debugLog(`版本 ${version} 无变更`);
     }
   }
@@ -703,28 +728,91 @@ class DatabaseManager {
   }
 
   async connect() {
-    this.connection = await mysql.createConnection(DB_CONFIG);
-    console.log('✅ 数据库连接成功');
+    // 使用 Etherpad settings 中的数据库配置
+    this.connection = await mysql.createConnection({
+      host: settings.dbSettings.host,
+      port: settings.dbSettings.port,
+      user: settings.dbSettings.user,
+      password: settings.dbSettings.password,
+      database: settings.dbSettings.database,
+      charset: 'utf8mb4'
+    });
+    console.log('✅ MySQL 数据库连接成功');
   }
 
   async close() {
     if (this.connection) {
       await this.connection.end();
-      console.log('🔌 数据库连接已关闭');
+      console.log('🔌 MySQL 连接已关闭');
     }
   }
 
   formatHKTime(timestamp) {
-    if (!timestamp) return '';
+    return formatHKTime(timestamp);
+  }
+
+  /**
+   * 删除可能存在的旧临时表
+   */
+  async dropOldTempTables() {
+    console.log('🗑️  清理可能存在的旧临时表...');
+    try {
+      await this.connection.execute('DROP TABLE IF EXISTS pad_version_contents_temp');
+      await this.connection.execute('DROP TEMPORARY TABLE IF EXISTS pad_version_snapshots_temp');
+      console.log('✅ 旧临时表清理完成');
+    } catch (err) {
+      console.log('⚠️  清理旧临时表时出错（可能不存在）:', err.message);
+  }
+}
+
+/**
+   * 创建临时内容表（使用普通表以便检查）
+   */
+  async createTempContentsTable() {
+    // 先删除可能存在的旧表
+    await this.connection.execute('DROP TABLE IF EXISTS pad_version_contents_temp');
     
-    const date = new Date(timestamp);
-    const pad = (n) => String(n).padStart(2, '0');
-    const padMs = (n) => String(n).padStart(3, '0');
+    const createTableSQL = `
+      CREATE TABLE pad_version_contents_temp (
+        pad_id VARCHAR(255) NOT NULL,
+        revision INT NOT NULL,
+        content LONGTEXT NOT NULL,
+        author_id VARCHAR(255) DEFAULT '',
+        timestamp BIGINT NOT NULL,
+        formatted_timestamp VARCHAR(30) DEFAULT NULL,
+        PRIMARY KEY (pad_id, revision)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `;
+    await this.connection.execute(createTableSQL);
+    console.log('✅ 临时内容表 pad_version_contents_temp 已创建');
+  }
+
+  /**
+   * 插入版本内容到临时表
+   */
+  async insertTempContent(record) {
+    const query = `
+      INSERT INTO pad_version_contents_temp
+      (pad_id, revision, content, author_id, timestamp, formatted_timestamp)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `;
     
-    const hkDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
-    
-    return `${hkDate.getUTCFullYear()}-${pad(hkDate.getUTCMonth() + 1)}-${pad(hkDate.getUTCDate())} ` +
-      `${pad(hkDate.getUTCHours())}:${pad(hkDate.getUTCMinutes())}:${pad(hkDate.getUTCSeconds())}.${padMs(hkDate.getUTCMilliseconds())}`;
+    await this.connection.execute(query, [
+      record.pad_id,
+      record.revision,
+      record.content,
+      record.author,
+      record.timestamp,
+      record.formatted_timestamp
+    ]);
+  }
+
+  /**
+   * 删除临时内容表
+   */
+  async dropTempContentsTable() {
+    await this.connection.execute('DROP TABLE IF EXISTS pad_version_contents_temp');
+    console.log('🗑️  临时内容表 pad_version_contents_temp 已删除');
   }
 
   /**
@@ -754,12 +842,12 @@ class DatabaseManager {
   }
 
   /**
-   * 从 pad_version_contents 读取版本数据
+   * 从 pad_version_contents_temp 读取版本数据
    */
-  async getPadVersions(padId) {
+  async getPadVersionsFromTemp(padId) {
     const query = `
       SELECT pad_id, revision, content, author_id, timestamp
-      FROM pad_version_contents
+      FROM pad_version_contents_temp
       WHERE pad_id = ?
       ORDER BY revision ASC
     `;
@@ -773,7 +861,7 @@ class DatabaseManager {
    */
   async insertTempSnapshot(snapshot) {
     const query = `
-      INSERT INTO pad_version_snapshots_temp 
+      INSERT INTO pad_version_snapshots_temp
       (pad_id, revision, formatted_timestamp, deletions_json)
       VALUES (?, ?, ?, ?)
     `;
@@ -856,7 +944,7 @@ class DatabaseManager {
     if (changes.length === 0) return;
 
     console.log(`💾 开始保存 ${changes.length} 条变更记录到对比表...`);
-    
+      
     const query = `
       INSERT INTO pad_version_changes_compare 
       (pad_id, seq_order, behavior, author, content, add_start_time, add_end_time, delete_start_time, delete_end_time)
@@ -868,16 +956,16 @@ class DatabaseManager {
     for (const change of changes) {
       try {
         await this.connection.execute(query, [
-          change.pad_id,
-          change.seq_order,
-          change.behavior,
-          change.author,
-          change.content,
-          change.add_start_time,
-          change.add_end_time,
-          change.delete_start_time,
-          change.delete_end_time
-        ]);
+      change.pad_id,
+      change.seq_order,
+      change.behavior,
+      change.author,
+      change.content,
+      change.add_start_time,
+      change.add_end_time,
+      change.delete_start_time,
+      change.delete_end_time
+    ]);
         successCount++;
         
         if (successCount % 100 === 0) {
@@ -954,9 +1042,106 @@ class PadSnapshotGenerator {
     this.validationErrors = [];
   }
 
+  /**
+   * 步骤1: 从 Etherpad store 重建版本内容（与 PadContentRebuild.js 逻辑完全一致）
+   */
+  async rebuildPadContents(padId) {
+    console.log('🔧 连接 Etherpad 数据库...');
+    await db.init();
+    console.log('✓ Etherpad 数据库连接成功');
+
+    console.log('🔧 加载 Changeset 模块...');
+    const { makeAText, applyToAText } = Changeset;
+    console.log('✓ Changeset 模块加载成功');
+
+    console.log(`🔍 检查 Pad [${padId}] 是否存在...`);
+    const exists = await padManager.doesPadExists(padId);
+    if (!exists) {
+      throw new Error(`Pad [${padId}] 不存在`);
+    }
+
+    const pad = await padManager.getPad(padId);
+    const headRevision = pad.getHeadRevisionNumber();
+    console.log(`✓ 找到 Pad [${padId}], 当前版本: ${headRevision}\n`);
+
+    // 创建临时内容表
+    await this.db.createTempContentsTable();
+
+    console.log('🚀 开始重建版本内容...');
+    let atext = makeAText('\n');
+    console.log(`✓ 初始化文本: "${atext.text.replace(/\n/g, '\\n')}"\n`);
+
+    let successCount = 0;
+    let errorCount = 0;
+
+    for (let rev = 0; rev <= headRevision; rev++) {
+      try {
+        const revData = await db.get(`pad:${padId}:revs:${rev}`);
+
+        if (!revData) {
+          console.error(`  ✗ Rev ${rev}: 数据不存在`);
+          errorCount++;
+          continue;
+        }
+
+        const { changeset, meta } = revData;
+        const { author, timestamp, pool: metaPool } = meta;
+
+        const pool = metaPool || pad.apool();
+
+        const oldText = atext.text;
+        atext = applyToAText(changeset, atext, pool);
+        const newText = atext.text;
+
+        // 提取纯文本内容（去掉末尾换行符）
+        let content = newText;
+        if (content.endsWith('\n')) {
+          content = content.slice(0, -1);
+        }
+
+        // 准备数据库记录
+        const record = {
+          pad_id: padId,
+          revision: rev,
+          content: content,
+          author: author || '',
+          timestamp: timestamp || Date.now(),
+          formatted_timestamp: formatHKTime(timestamp || Date.now())
+        };
+
+        // 插入到临时表
+        await this.db.insertTempContent(record);
+        successCount++;
+
+        // 显示进度
+        if (rev % 5 === 0 || rev === headRevision || rev < 10) {
+          const preview = content.substring(0, 40).replace(/\n/g, '\\n');
+          const changeSummary = `${oldText.length} -> ${newText.length} chars`;
+          console.log(`  ✓ Rev ${rev}: "${preview}${content.length > 40 ? '...' : ''}" (${changeSummary})`);
+        }
+
+        // 每 20 个版本显示一次总进度
+        if ((rev + 1) % 20 === 0) {
+          console.log(`    📊 进度: ${rev + 1}/${headRevision + 1} (${Math.round((rev + 1) / (headRevision + 1) * 100)}%)`);
+        }
+
+      } catch (err) {
+        console.error(`  ✗ Rev ${rev} 处理失败:`, err.message);
+        errorCount++;
+      }
+    }
+
+    console.log(`\n✅ 步骤1完成！`);
+    console.log(`  - 总版本数: ${headRevision + 1}`);
+    console.log(`  - 成功处理: ${successCount}`);
+    console.log(`  - 失败数量: ${errorCount}`);
+
+    return { successCount, errorCount, totalVersions: headRevision + 1 };
+  }
+
   async generateAndExport(padId) {
     console.log(`\n${'='.repeat(70)}`);
-    console.log(`🚀 Pad 版本变更记录生成工具（合并版 - 使用临时表）`);
+    console.log(`🚀 Pad 版本变更记录生成工具（完整流程 - 合并版）`);
     console.log(`${'='.repeat(70)}`);
     console.log(`📝 目标 Pad: ${padId}`);
     console.log(`⏰ 开始时间: ${new Date().toLocaleString('zh-CN')}`);
@@ -964,25 +1149,42 @@ class PadSnapshotGenerator {
     console.log(`${'='.repeat(70)}\n`);
 
     try {
+      // 连接 MySQL
       await this.db.connect();
       
-      // 步骤1: 创建临时快照表
-      console.log('🔧 步骤1: 创建临时快照表...');
+      // 清理旧的临时表
+      await this.db.dropOldTempTables();
+      
+      // 步骤1: 从 Etherpad store 重建版本内容到临时表
+      console.log('\n========================================');
+      console.log(`📝 步骤1: 重建 Pad [${padId}] 的版本内容`);
+      console.log('========================================\n');
+      
+      const rebuildResult = await this.rebuildPadContents(padId);
+      
+      if (rebuildResult.errorCount > 0) {
+        console.log(`\n⚠️  警告: ${rebuildResult.errorCount} 个版本重建失败`);
+      }
+
+      // 步骤2: 创建临时快照表
       await this.db.createTempSnapshotTable();
 
-      // 步骤2: 读取版本数据
-      console.log(`\n📖 步骤2: 从 pad_version_contents 读取版本数据...`);
-      const versions = await this.db.getPadVersions(padId);
+      // 步骤3: 从临时内容表读取版本数据
+      console.log('\n========================================');
+      console.log(`📸 步骤2: 生成 Pad [${padId}] 的版本快照`);
+      console.log('========================================\n');
+      
+      console.log(`📚 从临时表读取版本数据...`);
+      const versions = await this.db.getPadVersionsFromTemp(padId);
       
       if (versions.length === 0) {
         console.log(`❌ 未找到 Pad ${padId} 的版本数据`);
         return;
       }
 
-      console.log(`✅ 读取到 ${versions.length} 个版本\n`);
+      console.log(`📚 从临时表读取到 ${versions.length} 个版本\n`);
 
-      // 步骤3: 生成快照到临时表
-      console.log('📸 步骤3: 开始构建版本快照...');
+      console.log(`🔄 开始构建版本快照...`);
       console.log(`   总版本数: ${versions.length}\n`);
       
       const snapshots = [];
@@ -1048,7 +1250,7 @@ class PadSnapshotGenerator {
         }
 
         snapshots.push({
-          pad_id: padId,
+    pad_id: padId,
           revision: currVersion.revision,
           formatted_timestamp: this.db.formatHKTime(currVersion.timestamp || Date.now()),
           operation_history: result.operationHistory
@@ -1059,8 +1261,9 @@ class PadSnapshotGenerator {
 
       await this.db.insertTempSnapshots(snapshots);
 
-      // 步骤4: 创建对比表
-      console.log('\n🔧 步骤4: 检查/创建 pad_version_changes_compare 表...');
+      // 步骤3: 导出到对比表
+      console.log('\n📤 导出最新快照数据到对比表...');
+      await this.db.ensureChangesCompareTable();
       await this.db.ensureChangesCompareTable();
 
       // 检查是否已存在该 pad 的数据
@@ -1070,18 +1273,17 @@ class PadSnapshotGenerator {
       );
       
       if (existing[0].count > 0) {
-        console.log(`🔍 检测到重复的 pad_id，执行更新操作...`);
         await this.db.deletePadChangesCompare(padId);
-      } else {
-        console.log(`➕ 新增 pad_id，执行插入操作...`);
       }
 
-      // 步骤5: 导出到对比表
       await this.db.exportSnapshotsToChanges(padId);
 
-      // 步骤6: 删除临时表
-      console.log('\n🧹 步骤6: 清理临时表...');
+      // 步骤4: 清理临时表
+      console.log('\n========================================');
+      console.log(`🧹 步骤4: 清理临时表`);
+      console.log('========================================\n');
       await this.db.dropTempSnapshotTable();
+      await this.db.dropTempContentsTable();
 
       console.log(`\n${'='.repeat(70)}`);
       console.log('📊 处理完成');
@@ -1114,7 +1316,13 @@ class PadSnapshotGenerator {
       if (this.snapshotBuilder && this.snapshotBuilder.docManager) {
         this.snapshotBuilder.docManager.cleanupSentenceSplitter();
       }
+      // 关闭 MySQL 连接
       await this.db.close();
+      // 关闭 Etherpad 数据库连接
+      if (db.db && db.db.close) {
+        await db.db.close();
+        console.log('🔌 Etherpad 数据库连接已关闭');
+      }
     }
   }
 }
@@ -1129,7 +1337,7 @@ async function main() {
   
   if (!padId || args.includes('--help') || args.includes('-h')) {
     console.log(`
-使用方法: node ${path.basename(__filename)} <padId> [选项]
+使用方法: cd src && node --require tsx/cjs node/scheduler/etherpad_changes/${path.basename(__filename)} <padId> [选项]
 
 参数:
   <padId>        要生成变更记录的 Pad ID
@@ -1139,15 +1347,18 @@ async function main() {
   --help, -h     显示帮助信息
 
 示例:
-  node ${path.basename(__filename)} room-229
-  node ${path.basename(__filename)} room-229 --debug
+  cd src && node --require tsx/cjs node/scheduler/etherpad_changes/${path.basename(__filename)} room-229
+  cd src && node --require tsx/cjs node/scheduler/etherpad_changes/${path.basename(__filename)} room-229 --debug
 
 说明:
-  合并版工具 - 使用临时表存储中间数据
-  1. 从 pad_version_contents 读取版本数据
-  2. 生成快照到临时表 pad_version_snapshots_temp
-  3. 导出到对比表 pad_version_changes_compare
-  4. 清理临时表
+  完整流程工具 - 使用临时表存储中间数据
+  1. 从 Etherpad store 重建版本内容到 pad_version_contents_temp
+  2. 从 pad_version_contents_temp 读取版本数据
+  3. 生成快照到临时表 pad_version_snapshots_temp
+  4. 导出到对比表 pad_version_changes_compare
+  5. 自动清理所有临时表
+  
+  数据流向: store → pad_version_contents_temp → pad_version_snapshots_temp → pad_version_changes_compare
     `);
     process.exit(0);
   }
