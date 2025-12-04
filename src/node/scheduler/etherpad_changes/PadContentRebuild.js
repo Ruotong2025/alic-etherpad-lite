@@ -172,20 +172,35 @@ const padId = process.argv[2];
 
           // 2. 插入/更新 MySQL 表
           try {
+            // 格式化时间戳为香港时间 (UTC+8)，格式：YYYY-MM-DD HH:mm:ss.SSS
+            const formatHKTime = (timestamp) => {
+              const date = new Date(timestamp);
+              const pad = (n) => String(n).padStart(2, '0');
+              const padMs = (n) => String(n).padStart(3, '0');
+              // 手动转换为香港时间（UTC+8）
+              const hkDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+              return `${hkDate.getUTCFullYear()}-${pad(hkDate.getUTCMonth() + 1)}-${pad(hkDate.getUTCDate())} ` +
+                `${pad(hkDate.getUTCHours())}:${pad(hkDate.getUTCMinutes())}:${pad(hkDate.getUTCSeconds())}.${padMs(hkDate.getUTCMilliseconds())}`;
+            };
+            
+            const formattedTimestamp = formatHKTime(record.timestamp);
+            
             await mysqlConnection.execute(`
               INSERT INTO pad_version_contents
-              (pad_id, revision, content, author_id, timestamp)
-              VALUES (?, ?, ?, ?, ?)
+              (pad_id, revision, content, author_id, timestamp, formatted_timestamp)
+              VALUES (?, ?, ?, ?, ?, ?)
               ON DUPLICATE KEY UPDATE
               content = VALUES(content),
               author_id = VALUES(author_id),
-              timestamp = VALUES(timestamp)
+              timestamp = VALUES(timestamp),
+              formatted_timestamp = VALUES(formatted_timestamp)
             `, [
               record.pad_id,
               record.revision,
               record.content,
               record.author,  // 使用 author 作为 author_id
-              record.timestamp
+              record.timestamp,
+              formattedTimestamp
             ]);
 
             if (isUpdate) {

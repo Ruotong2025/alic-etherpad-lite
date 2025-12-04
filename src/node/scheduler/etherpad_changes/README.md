@@ -269,3 +269,7 @@ segments = [
 - segments 数组的顺序 = **文档中文本的从左到右顺序**
 - 这个顺序在整个编辑过程中保持一致
 
+
+node --require tsx/cjs node/scheduler/etherpad_changes/generatePadVersionSnapshots.js room-229
+node node/scheduler/etherpad_changes/exportToChangesTable.js room-229
+node --require tsx/cjs node/scheduler/etherpad_changes/PadContentRebuild.js room-229

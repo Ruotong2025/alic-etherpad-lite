@@ -433,52 +433,15 @@ class DocumentSegmentManager {
       
       if (position === currentPos) {
         // 在片段开头插入
-        // 检查该片段之后是否有连续的 deleted 片段
-        let insertIndex = i;
-        let nextIndex = i + 1;  // 从下一个片段开始检查
-        
-        // 向后查找，跳过所有紧邻的 deleted 片段
-        while (nextIndex < this.segments.length && this.segments[nextIndex].type === 'deleted') {
-          nextIndex++;
-        }
-        
-        // 如果找到了 deleted 片段，插入到最后一个 deleted 片段之后
-        if (nextIndex > i + 1) {
-          insertIndex = nextIndex;
-          debugLog(`    在片段 ${i} 位置发现后续 deleted 片段（索引 ${i+1} 到 ${nextIndex-1}），插入到索引 ${insertIndex}（deleted 片段之后）`);
-          
-          // 特殊处理：如果当前片段（i）需要保持在插入内容之后
-          // 先移除当前片段，插入新内容，再把当前片段插回去
-          const currentSegment = this.segments[i];
-          this.segments.splice(i, 1);  // 移除当前片段
-          
-          // 调整插入索引（因为移除了一个片段）
-          insertIndex--;
-          
-          // 插入新内容
-          this.segments.splice(insertIndex, 0, {
-            type: 'normal',
-            content: content,
-            version: version,
-            author: authorId,
-            timestamp: timestamp
-          });
-          
-          // 把原来的片段插回到新内容之后
-          this.segments.splice(insertIndex + 1, 0, currentSegment);
-          
-          debugLog(`    调整顺序：当前片段移到新内容之后`);
-        } else {
-          // 没有 deleted 片段，直接在当前位置之前插入
-          this.segments.splice(i, 0, {
-            type: 'normal',
-            content: content,
-            version: version,
-            author: authorId,
-            timestamp: timestamp
-          });
-          debugLog(`    在片段 ${i} 前插入`);
-        }
+        // 直接在当前位置前插入，deleted 片段会自动保持在正确位置
+        this.segments.splice(i, 0, {
+          type: 'normal',
+          content: content,
+          version: version,
+          author: authorId,
+          timestamp: timestamp
+        });
+        debugLog(`    在片段 ${i} 前插入`);
         return;
       } else if (position > currentPos && position < segmentEndPos) {
         // 在片段中间插入，需要分割
