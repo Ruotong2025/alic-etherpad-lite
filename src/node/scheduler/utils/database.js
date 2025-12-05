@@ -20,30 +20,9 @@ function loadDatabaseConfig() {
     console.log('📖 读取settings.json配置文件');
     const settingsContent = fs.readFileSync(settingsPath, 'utf8');
     
-    console.log('📝 处理JSON注释和格式问题...');
-    // 更严格的注释移除和格式清理
-    let cleanedContent = settingsContent
-      // 移除多行注释 /* ... */
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      // 移除单行注释 // ... 但不包括URL中的//
-      .replace(/(?<!")\/\/.*$/gm, '')
-      // 移除多余的空白行
-      .replace(/^\s*[\r\n]/gm, '')
-      // 移除控制字符
-      .replace(/[\x00-\x1F\x7F]/g, '')
-      // 清理空白
-      .trim();
-    
-    // 验证JSON结构
-    if (!cleanedContent.startsWith('{')) {
-      throw new Error('settings.json格式错误：文件应该以 { 开头');
-    }
-    if (!cleanedContent.endsWith('}')) {
-      throw new Error('settings.json格式错误：文件应该以 } 结尾');
-    }
-    
-    console.log('🔍 尝试解析JSON...');
-    const settings = JSON.parse(cleanedContent);
+    console.log('🔍 解析JSON配置...');
+    // 直接解析JSON,不做额外处理(settings.json 应该是标准JSON格式)
+    const settings = JSON.parse(settingsContent);
     
     // 验证数据库配置
     if (!settings.dbSettings) {
@@ -77,23 +56,20 @@ function loadDatabaseConfig() {
     
   } catch (error) {
     console.error('❌ 读取settings.json配置失败:', error.message);
-    console.warn('⚠️  使用备用数据库配置');
+    console.error('💡 请确保 settings.json 文件存在且格式正确');
+    console.error('💡 settings.json 应包含以下数据库配置:');
+    console.error('   {');
+    console.error('     "dbSettings": {');
+    console.error('       "user": "数据库用户名",');
+    console.error('       "host": "数据库主机",');
+    console.error('       "port": 数据库端口,');
+    console.error('       "password": "数据库密码",');
+    console.error('       "database": "数据库名"');
+    console.error('     }');
+    console.error('   }');
     
-    // 备用配置（从您之前提供的信息中获取）
-    const fallbackConfig = {
-      user: "root",
-      host: "112.74.92.135",
-      port: 3306,
-      password: "1q2w3e4R",
-      database: "alic",
-      charset: "utf8mb4",
-      ssl: false
-    };
-    
-    console.log('✅ 使用备用数据库配置');
-    console.log(`📊 数据库配置: ${fallbackConfig.user}@${fallbackConfig.host}:${fallbackConfig.port}/${fallbackConfig.database}`);
-    
-    return fallbackConfig;
+    // 不提供备用配置,强制使用正确的 settings.json
+    throw new Error('无法读取数据库配置,请检查 settings.json 文件');
   }
 }
 

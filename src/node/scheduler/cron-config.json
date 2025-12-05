@@ -2,12 +2,21 @@
   "enabled": true,
   "timezone": "Asia/Shanghai",
   "task_schedules": {
+    "pad_changes_incremental": {
+      "cron": "0 2 * * *",
+      "command": "--process-pad_changes",
+      "description": "Pad版本变更智能增量处理 (处理前一天的数据)",
+      "target_table": "pad_version_changes_compare",
+      "priority": 1,
+      "estimated_duration": "30-120分钟",
+      "log_file": "pad-changes.log"
+    },
     "author_data_sync": {
       "cron": "0 4 * * *",
       "command": "--process-etherpad_author",
       "description": "作者信息全量更新",
       "target_table": "etherpad_author",
-      "priority": 1,
+      "priority": 2,
       "estimated_duration": "10-30分钟",
       "log_file": "author-sync.log"
     },
@@ -16,7 +25,7 @@
       "command": "--process-etherpad_pad_info",
       "description": "Pad基础信息提取",
       "target_table": "etherpad_pad_info",
-      "priority": 2,
+      "priority": 3,
       "estimated_duration": "10-20分钟",
       "log_file": "pad-info.log"
     }
@@ -26,12 +35,18 @@
     "sequence": [
       {
         "step": 1,
+        "time": "02:00",
+        "task": "pad_changes_incremental",
+        "purpose": "智能检测前一天有变更的pads，重新生成版本变更记录到 pad_version_changes_compare 表"
+      },
+      {
+        "step": 2,
         "time": "04:00",
         "task": "author_data_sync",
         "purpose": "全量同步作者信息到 etherpad_author 表"
       },
       {
-        "step": 2,
+        "step": 3,
         "time": "04:30",
         "task": "pad_info_extraction",
         "purpose": "全量提取 Pad 基础信息到 etherpad_pad_info 表"

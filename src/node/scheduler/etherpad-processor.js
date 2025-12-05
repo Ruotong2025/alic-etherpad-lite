@@ -1,12 +1,14 @@
 /**
  * Etherpad数据处理器
- * 仅处理 etherpad_author 和 etherpad_pad_info 两张表
+ * 处理 etherpad_author、etherpad_pad_info 和 pad_version_changes
  */
 
 const Database = require('./utils/database.js');
 const { extractPadBasicInfo, parsePadData } = require('./utils/parser.js');
 const { formatTime, generateTaskId } = require('./utils/scheduler');
 const { convertTimestampToBeijingTime } = require('./utils/timeConverter.js');
+const { fork } = require('child_process');
+const path = require('path');
 
 class EtherpadProcessor {
   constructor() {
@@ -303,6 +305,202 @@ class EtherpadProcessor {
       return { success: false, reason: error.message };
     }
   }
+
+  // ==================== pad_version_changes 相关方法 ====================
+
+  /**
+   * 检测前一天有变更的 pads (通过检测前一天的时间戳)
+   */
+  async detectChangedPads(targetDate = null) {
+    console.log('🔍 开始检测前一天有变更的 pads...');
+    
+    try {
+      // 计算目标日期 (默认为昨天)
+      let date;
+      if (targetDate) {
+        date = new Date(targetDate);
+      } else {
+        // 默认为昨天
+        date = new Date();
+        date.setDate(date.getDate() - 1);
+      }
+      
+      // 计算目标日期的时间范围
+      const startOfDay = new Date(date);
+      startOfDay.setHours(0, 0, 0, 0);
+      const endOfDay = new Date(date);
+      endOfDay.setHours(23, 59, 59, 999);
+      
+      const startTimestamp = startOfDay.getTime();
+      const endTimestamp = endOfDay.getTime();
+      
+      console.log(`📅 检测日期: ${date.toLocaleDateString('zh-CN')} (前一天)`);
+      console.log(`📅 时间范围: ${startOfDay.toLocaleString('zh-CN')} ~ ${endOfDay.toLocaleString('zh-CN')}`);
+      console.log(`📅 时间戳范围: ${startTimestamp} ~ ${endTimestamp}`);
+      
+      // 从 store 表中查询当天有变更的 pads
+      // store 表的 value 中包含 meta.timestamp
+      const query = `
+        SELECT DISTINCT
+          SUBSTRING_INDEX(SUBSTRING_INDEX(\`key\`, ':', 2), ':', -1) as pad_id
+        FROM store
+        WHERE \`key\` LIKE 'pad:%:revs:%'
+          AND JSON_EXTRACT(value, '$.meta.timestamp') >= ?
+          AND JSON_EXTRACT(value, '$.meta.timestamp') <= ?
+        ORDER BY pad_id
+      `;
+      
+      const [pads] = await this.db.connection.execute(query, [startTimestamp, endTimestamp]);
+      console.log(`📊 找到 ${pads.length} 个前一天有变更的 pads`);
+      
+      const changedPads = pads.map(row => ({
+        padId: row.pad_id,
+        detectionDate: date.toLocaleDateString('zh-CN')
+      }));
+      
+      if (changedPads.length > 0) {
+        console.log('\n📝 需要处理的 Pads:');
+        changedPads.forEach((pad, index) => {
+          console.log(`  ${index + 1}. ${pad.padId}`);
+        });
+      }
+      
+      console.log(`\n📊 检测结果: 共 ${changedPads.length} 个 pads 需要处理`);
+      return changedPads;
+      
+    } catch (error) {
+      console.error('❌ 检测变更失败:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * 处理单个 pad 的 changes (调用 generatePadChanges.js)
+   */
+  async processPadChanges(padId) {
+    console.log(`\n🔧 处理 pad: ${padId}`);
+    
+    return new Promise((resolve, reject) => {
+      const scriptPath = path.join(__dirname, 'etherpad_changes', 'generatePadChanges.js');
+      
+      // 设置正确的工作目录(src目录),以便能找到 ep_etherpad-lite 模块
+      const srcDir = path.join(__dirname, '../..');
+      
+      // 使用 fork 执行 generatePadChanges.js
+      // 需要添加 --require tsx/cjs 以便加载 TypeScript 模块
+      const child = fork(scriptPath, [padId], {
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        cwd: srcDir,  // 在 src 目录下运行
+        execArgv: ['--require', 'tsx/cjs']  // 添加 tsx/cjs 加载器
+      });
+      
+      let output = '';
+      let errorOutput = '';
+      
+      child.stdout.on('data', (data) => {
+        const text = data.toString();
+        output += text;
+        process.stdout.write(text); // 实时输出
+      });
+      
+      child.stderr.on('data', (data) => {
+        const text = data.toString();
+        errorOutput += text;
+        process.stderr.write(text); // 实时输出错误
+      });
+      
+      child.on('exit', (code) => {
+        if (code === 0) {
+          console.log(`✅ ${padId} 处理完成`);
+          resolve({ success: true, padId, output });
+        } else {
+          console.error(`❌ ${padId} 处理失败 (退出码: ${code})`);
+          reject(new Error(`Process exited with code ${code}: ${errorOutput}`));
+        }
+      });
+      
+      child.on('error', (error) => {
+        console.error(`❌ ${padId} 执行错误:`, error);
+        reject(error);
+      });
+    });
+  }
+
+  /**
+   * 运行 pad changes 处理任务
+   */
+  async runPadChangesTask() {
+    const taskId = generateTaskId();
+    console.log(`🚀 开始执行 Pad Changes 处理任务 ${taskId}`);
+    console.log(`⏰ 开始时间: ${formatTime(new Date())}`);
+    
+    try {
+      await this.connect();
+      
+      // 1. 检测有变更的 pads
+      const changedPads = await this.detectChangedPads();
+      
+      if (changedPads.length === 0) {
+        console.log('✅ 没有需要处理的 pads');
+        return {
+          success: true,
+          taskId,
+          total: 0,
+          processed: 0,
+          failed: 0
+        };
+      }
+      
+      // 2. 逐个处理有变更的 pads
+      let processedCount = 0;
+      let failedCount = 0;
+      const failedPads = [];
+      
+      for (const pad of changedPads) {
+        try {
+          await this.processPadChanges(pad.padId);
+          processedCount++;
+        } catch (error) {
+          console.error(`❌ 处理 ${pad.padId} 失败:`, error.message);
+          failedCount++;
+          failedPads.push({
+            padId: pad.padId,
+            error: error.message
+          });
+        }
+        
+        // 显示进度
+        console.log(`\n📈 进度: ${processedCount + failedCount}/${changedPads.length}`);
+      }
+      
+      console.log('\n📊 Pad Changes 处理完成统计:');
+      console.log(`   总数: ${changedPads.length}`);
+      console.log(`   成功: ${processedCount}`);
+      console.log(`   失败: ${failedCount}`);
+      
+      if (failedPads.length > 0) {
+        console.log('\n失败的 Pads:');
+        failedPads.forEach(p => console.log(`  - ${p.padId}: ${p.error}`));
+      }
+      
+      console.log(`⏰ 结束时间: ${formatTime(new Date())}`);
+      
+      return {
+        success: true,
+        taskId,
+        total: changedPads.length,
+        processed: processedCount,
+        failed: failedCount,
+        failedPads
+      };
+      
+    } catch (error) {
+      console.error('❌ Pad Changes 处理任务失败:', error);
+      return { success: false, error: error.message, taskId };
+    } finally {
+      await this.disconnect();
+    }
+  }
 }
 
 // 命令行入口
@@ -336,6 +534,19 @@ async function main() {
       process.exit(1);
     }
 
+  } else if (args.includes('--process-pad_changes')) {
+    // 处理 pad_version_changes (智能增量)
+    console.log(`🔄 [${new Date().toISOString()}] 开始执行 Pad Changes 智能增量处理任务`);
+    const result = await processor.runPadChangesTask();
+    
+    if (result.success) {
+      console.log(`✅ [${new Date().toISOString()}] Pad Changes 处理完成`);
+      console.log(`📊 处理统计: 总数${result.total}, 成功${result.processed}, 失败${result.failed}`);
+    } else {
+      console.log(`❌ [${new Date().toISOString()}] Pad Changes 处理失败: ${result.error}`);
+      process.exit(1);
+    }
+
   } else {
     // 显示帮助信息
     console.log('🚀 Etherpad数据处理器');
@@ -343,14 +554,17 @@ async function main() {
     console.log('使用方法:');
     console.log('  node etherpad-processor.js --process-etherpad_author       # 全量处理 etherpad_author');
     console.log('  node etherpad-processor.js --process-etherpad_pad_info     # 全量处理 etherpad_pad_info');
+    console.log('  node etherpad-processor.js --process-pad_changes           # 智能增量处理 pad_version_changes');
     console.log('');
     console.log('功能说明:');
     console.log('  --process-etherpad_author: 全量处理作者数据，清空并重新同步所有作者信息');
     console.log('  --process-etherpad_pad_info: 全量处理pad基础信息，提取atext、pool等数据');
+    console.log('  --process-pad_changes: 智能增量处理，检测有变更的pads并重新生成changes数据');
     console.log('');
     console.log('数据表说明:');
     console.log('  etherpad_author: 存储作者信息和颜色配置');
     console.log('  etherpad_pad_info: 存储pad的基础信息和当前状态');
+    console.log('  pad_version_changes_compare: 存储pad的版本变更历史和操作记录');
   }
 }
 

@@ -725,19 +725,52 @@ class SnapshotBuilderV3 {
 class DatabaseManager {
   constructor() {
     this.connection = null;
+    this.dbConfig = null;
+  }
+
+  // 加载数据库配置 (与 utils/database.js 保持一致)
+  loadDatabaseConfig() {
+    try {
+      // 使用 Etherpad settings 中的数据库配置
+      if (!settings.dbSettings) {
+        throw new Error('settings中缺少dbSettings配置');
+      }
+      
+      const dbSettings = settings.dbSettings;
+      const config = {
+        host: dbSettings.host,
+        port: dbSettings.port,
+        user: dbSettings.user,
+        password: dbSettings.password,
+        database: dbSettings.database,
+        charset: dbSettings.charset || 'utf8mb4',
+        ssl: dbSettings.ssl || false
+      };
+      
+      console.log(`📊 数据库配置: ${config.user}@${config.host}:${config.port}/${config.database}`);
+      return config;
+      
+    } catch (error) {
+      console.error('❌ 读取数据库配置失败:', error.message);
+      throw error;
+    }
   }
 
   async connect() {
-    // 使用 Etherpad settings 中的数据库配置
-    this.connection = await mysql.createConnection({
-      host: settings.dbSettings.host,
-      port: settings.dbSettings.port,
-      user: settings.dbSettings.user,
-      password: settings.dbSettings.password,
-      database: settings.dbSettings.database,
-      charset: 'utf8mb4'
-    });
-    console.log('✅ MySQL 数据库连接成功');
+    try {
+      // 加载数据库配置
+      this.dbConfig = this.loadDatabaseConfig();
+      console.log(`📡 连接数据库: ${this.dbConfig.user}@${this.dbConfig.host}:${this.dbConfig.port}/${this.dbConfig.database}`);
+      
+      // 创建数据库连接
+      this.connection = await mysql.createConnection(this.dbConfig);
+      console.log('✅ MySQL 数据库连接成功');
+      
+    } catch (error) {
+      console.error('❌ MySQL 数据库连接失败:', error);
+      console.error('💡 请检查 settings 中的数据库配置');
+      throw error;
+    }
   }
 
   async close() {
