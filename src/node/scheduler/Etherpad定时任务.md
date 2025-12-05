@@ -179,7 +179,6 @@ ls -lh logs/*.log
 **A**: 可以！保留了原来的手动执行方式：
 ```bash
 cd D:\ALIC\alic-etherpad-lite
-node src/node/scheduler/etherpad-processor.js --process-etherpad_author
 ```
 
 ### Q: Windows上也能用吗？
@@ -247,3 +246,8 @@ TaskScheduler.initialize()
 
 **🎉 享受自动化的定时任务！有问题随时查看日志文件。**
 
+
+
+PS D:\ALIC\alic-etherpad-lite\src>
+node node\scheduler\etherpad-processor.js --process-etherpad_author
+node node\scheduler\etherpad-processor.js --process-etherpad_pad_info

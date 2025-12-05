@@ -19,15 +19,23 @@
       "priority": 2,
       "estimated_duration": "10-20分钟",
       "log_file": "pad-info.log"
-    },
-    "pad_version_incremental": {
-      "cron": "0 5 * * *",
-      "command": "--process-incremental-etherpad_pad_version",
-      "description": "Pad版本增量处理",
-      "target_table": "etherpad_pad_version",
-      "priority": 3,
-      "estimated_duration": "30-60分钟",
-      "log_file": "pad-version.log"
     }
+  },
+  "execution_flow": {
+    "description": "每日凌晨自动执行数据同步任务",
+    "sequence": [
+      {
+        "step": 1,
+        "time": "04:00",
+        "task": "author_data_sync",
+        "purpose": "全量同步作者信息到 etherpad_author 表"
+      },
+      {
+        "step": 2,
+        "time": "04:30",
+        "task": "pad_info_extraction",
+        "purpose": "全量提取 Pad 基础信息到 etherpad_pad_info 表"
+      }
+    ]
   }
-} 
+}
