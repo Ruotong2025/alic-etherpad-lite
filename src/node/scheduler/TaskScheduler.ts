@@ -178,7 +178,6 @@ export class TaskScheduler {
    */
   private async executeTask(taskName: string, taskConfig: TaskConfig): Promise<void> {
     const startTime = Date.now();
-    const logFile = path.join(this.logDir, taskConfig.log_file);
 
     logger.info(`▶️  开始执行任务: ${taskName}`);
     logger.info(`   时间: ${new Date().toLocaleString('zh-CN', { timeZone: this.config?.timezone || 'Asia/Shanghai' })}`);
@@ -189,28 +188,13 @@ export class TaskScheduler {
         this.processorPath,
         [taskConfig.command],
         {
-          stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+          stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
           env: {
             ...process.env,
-            TASK_NAME: taskName,
-            LOG_FILE: logFile
+            TASK_NAME: taskName
           }
         }
       );
-
-      // 将子进程输出写入日志文件
-      const logStream = await fs.open(logFile, 'a');
-      const logWriter = logStream.createWriteStream();
-
-      const timestamp = new Date().toISOString();
-      logWriter.write(`\n${'='.repeat(80)}\n`);
-      logWriter.write(`[${timestamp}] 开始执行任务: ${taskName}\n`);
-      logWriter.write(`描述: ${taskConfig.description}\n`);
-      logWriter.write(`目标表: ${taskConfig.target_table}\n`);
-      logWriter.write(`${'='.repeat(80)}\n\n`);
-
-      child.stdout?.pipe(logWriter);
-      child.stderr?.pipe(logWriter);
 
       // 等待子进程完成
       await new Promise<void>((resolve, reject) => {
@@ -219,23 +203,15 @@ export class TaskScheduler {
           
           if (code === 0) {
             logger.info(`✅ 任务完成: ${taskName} (耗时: ${duration}s)`);
-            logWriter.write(`\n[${new Date().toISOString()}] 任务成功完成 (耗时: ${duration}s)\n`);
             resolve();
           } else {
             logger.error(`❌ 任务失败: ${taskName} (退出码: ${code}, 耗时: ${duration}s)`);
-            logWriter.write(`\n[${new Date().toISOString()}] 任务失败 (退出码: ${code}, 耗时: ${duration}s)\n`);
             reject(new Error(`Task failed with code ${code}`));
           }
-          
-          logWriter.end();
-          logStream.close();
         });
 
         child.on('error', (error) => {
           logger.error(`❌ 任务执行错误: ${taskName}`, error);
-          logWriter.write(`\n[${new Date().toISOString()}] 执行错误: ${error.message}\n`);
-          logWriter.end();
-          logStream.close();
           reject(error);
         });
       });
@@ -338,8 +314,7 @@ export class TaskScheduler {
       logger.info(`   │ Cron: ${taskConfig.cron}`);
       logger.info(`   │ 目标: ${taskConfig.target_table}`);
       logger.info(`   │ 优先级: ${taskConfig.priority}`);
-      logger.info(`   │ 预计耗时: ${taskConfig.estimated_duration}`);
-      logger.info(`   └─ 日志: ${path.join(this.logDir, taskConfig.log_file)}`);
+      logger.info(`   └─ 预计耗时: ${taskConfig.estimated_duration}`);
       logger.info('');
     }
 
