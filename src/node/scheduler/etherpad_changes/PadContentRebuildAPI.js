@@ -14,9 +14,27 @@
 
 process.on('unhandledRejection', (err) => { throw err; });
 
+// 设置环境变量以最小化日志输出
+process.env.SUPPRESS_LOGS = 'true';
+
+// 禁用所有 console 输出到 stdout，确保只输出 JSON
+const originalStdoutWrite = process.stdout.write;
+const originalConsoleLog = console.log;
+const bufferedLogs = [];
+
+// 拦截所有 stdout 输出
+process.stdout.write = function(chunk, encoding, callback) {
+  bufferedLogs.push(chunk);
+  return true;
+};
+
 const db = require('ep_etherpad-lite/node/db/DB');
 const padManager = require('ep_etherpad-lite/node/db/PadManager');
 const Changeset = require('ep_etherpad-lite/static/js/Changeset');
+
+// 恢复 stdout 用于最后输出 JSON
+process.stdout.write = originalStdoutWrite;
+console.log = originalConsoleLog;
 
 // 解析命令行参数
 const args = process.argv.slice(2);
@@ -181,9 +199,6 @@ async function rebuildPadContent() {
       error: error.message,
       stack: error.stack
     };
-  } finally {
-    // 关闭数据库连接
-    await db.close();
   }
 }
 
