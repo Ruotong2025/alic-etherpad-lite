@@ -564,7 +564,7 @@ async function main() {
     console.log('数据表说明:');
     console.log('  etherpad_author: 存储作者信息和颜色配置');
     console.log('  etherpad_pad_info: 存储pad的基础信息和当前状态');
-    console.log('  pad_version_changes_compare: 存储pad的版本变更历史和操作记录');
+    console.log('  pad_version_changes: 存储pad的版本变更历史和操作记录');
   }
 }
 

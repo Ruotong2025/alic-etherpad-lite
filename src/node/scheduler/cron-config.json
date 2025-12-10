@@ -6,7 +6,7 @@
       "cron": "0 2 * * *",
       "command": "--process-pad_changes",
       "description": "Pad版本变更智能增量处理 (处理前一天的数据)",
-      "target_table": "pad_version_changes_compare",
+      "target_table": "pad_version_changes",
       "priority": 1,
       "estimated_duration": "30-120分钟",
       "log_file": "pad-changes.log"
@@ -37,7 +37,7 @@
         "step": 1,
         "time": "2:00",
         "task": "pad_changes_incremental",
-        "purpose": "智能检测前一天有变更的pads，重新生成版本变更记录到 pad_version_changes_compare 表"
+        "purpose": "智能检测前一天有变更的pads，重新生成版本变更记录到 pad_version_changes 表"
       },
       {
         "step": 2,

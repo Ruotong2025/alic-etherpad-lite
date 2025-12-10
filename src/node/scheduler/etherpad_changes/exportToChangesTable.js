@@ -48,7 +48,6 @@ class ChangeTableManager {
   async ensureChangesTable() {
     const createTableSQL = `
       CREATE TABLE IF NOT EXISTS pad_version_changes (
-        id BIGINT AUTO_INCREMENT,
         pad_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT 'Pad ID',
         seq_order INT NOT NULL COMMENT '操作顺序（从1开始）',
         behavior VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '操作类型：add 或 deleted',
@@ -58,8 +57,7 @@ class ChangeTableManager {
         add_end_time VARCHAR(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容添加结束时间（精确到毫秒）',
         delete_start_time VARCHAR(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容删除开始时间（精确到毫秒）',
         delete_end_time VARCHAR(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容删除结束时间（精确到毫秒）',
-        PRIMARY KEY (id) USING BTREE,
-        INDEX idx_pad_id(pad_id ASC) USING BTREE
+        PRIMARY KEY (pad_id, seq_order) USING BTREE COMMENT 'pad_id和seq_order联合主键，保证唯一性'
       ) COMMENT='Pad版本变更详细记录表（增量更新）' ROW_FORMAT=Dynamic;
     `;
 
@@ -107,15 +105,16 @@ class ChangeTableManager {
   }
 
   /**
-   * 批量插入变更记录
+   * 批量插入变更记录（使用 REPLACE INTO 自动处理主键冲突）
    */
   async insertChanges(changes) {
     if (changes.length === 0) return;
 
     console.log(`💾 开始保存 ${changes.length} 条变更记录...`);
     
+    // 使用 REPLACE INTO 自动处理主键冲突（pad_id + seq_order）
     const query = `
-      INSERT INTO pad_version_changes 
+      REPLACE INTO pad_version_changes 
       (pad_id, seq_order, behavior, author, content, add_start_time, add_end_time, delete_start_time, delete_end_time)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;

@@ -1,6 +1,5 @@
 DROP TABLE IF EXISTS `etherpad_pad_info`;
 CREATE TABLE `etherpad_pad_info`  (
-  `id` bigint NOT NULL AUTO_INCREMENT,
   `pad_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT 'Pad ID，去掉 pad: 前缀',
   `full_text` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL COMMENT 'atext.text：文本内容，pad 的全文本（带换行符），用户编辑内容',
   `attribs` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'atext.attribs：文本属性，每个字符的属性编码，用于标记作者、样式等',
@@ -12,5 +11,5 @@ CREATE TABLE `etherpad_pad_info`  (
   `saved_revisions` json NULL COMMENT 'savedRevisions：已保存的修订，数组，保存的历史 revision ID',
   `create_time` datetime NULL DEFAULT CURRENT_TIMESTAMP COMMENT '数据创建时间',
   `update_time` datetime NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '数据更新时间',
-  PRIMARY KEY (`id`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 11 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = 'Pad基础信息表' ROW_FORMAT = DYNAMIC;
+  PRIMARY KEY (`pad_id`) USING BTREE COMMENT 'pad_id作为主键，保证唯一性'
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = 'Pad基础信息表' ROW_FORMAT = DYNAMIC;

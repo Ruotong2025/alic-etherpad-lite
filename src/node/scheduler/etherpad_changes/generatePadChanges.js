@@ -7,7 +7,7 @@
  * 1. 基于 Etherpad Changeset 重建 Pad 所有版本内容到临时表 pad_version_contents_temp
  * 2. 从 pad_version_contents_temp 读取版本数据
  * 3. 生成版本快照到临时表 pad_version_snapshots_temp
- * 4. 解析临时表的 deletions_json 并导出到 pad_version_changes_compare
+ * 4. 解析临时表的 deletions_json 并导出到 pad_version_changes
  * 5. 删除所有临时表
  * 
  * 核心改进：
@@ -27,8 +27,7 @@
  *   cd src && node --require tsx/cjs node/scheduler/etherpad_changes/generatePadChanges.js room-229 --debug
  * 
  * 注意：
- *   - pad_version_changes_compare 表结构与 pad_version_changes 完全一致
- *   - 只导出最新版本的操作历史，用于数据对比验证
+ *   - 导出最新版本的操作历史到 pad_version_changes 表
  */
 
 'use strict';
@@ -806,7 +805,7 @@ class DatabaseManager {
     await this.connection.execute('DROP TABLE IF EXISTS pad_version_contents_temp');
     
     const createTableSQL = `
-      CREATE TABLE pad_version_contents_temp (
+      CREATE TEMPORARY TABLE IF NOT EXISTS pad_version_contents_temp (
         pad_id VARCHAR(255) NOT NULL,
         revision INT NOT NULL,
         content LONGTEXT NOT NULL,
@@ -934,12 +933,11 @@ class DatabaseManager {
   }
 
   /**
-   * 创建对比变更表
+   * 创建变更表
    */
-  async ensureChangesCompareTable() {
+  async ensureChangesTable() {
     const createTableSQL = `
-      CREATE TABLE IF NOT EXISTS pad_version_changes_compare (
-        id BIGINT AUTO_INCREMENT,
+      CREATE TABLE IF NOT EXISTS pad_version_changes (
         pad_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT 'Pad ID',
         seq_order INT NOT NULL COMMENT '操作顺序（从1开始）',
         behavior VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '操作类型：add 或 deleted',
@@ -949,21 +947,20 @@ class DatabaseManager {
         add_end_time VARCHAR(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容添加结束时间（精确到毫秒）',
         delete_start_time VARCHAR(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容删除开始时间（精确到毫秒）',
         delete_end_time VARCHAR(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '内容删除结束时间（精确到毫秒）',
-        PRIMARY KEY (id) USING BTREE,
-        INDEX idx_pad_id(pad_id ASC) USING BTREE
-      ) COMMENT='Pad版本变更详细记录表（对比用）' ROW_FORMAT=Dynamic;
+        PRIMARY KEY (pad_id, seq_order) USING BTREE COMMENT 'pad_id和seq_order联合主键，保证唯一性'
+      ) COMMENT='Pad版本变更详细记录表' ROW_FORMAT=Dynamic;
     `;
 
     await this.connection.execute(createTableSQL);
-    console.log('✅ pad_version_changes_compare 表已就绪');
+    console.log('✅ pad_version_changes 表已就绪');
   }
 
   /**
    * 删除指定 pad 的变更记录
    */
-  async deletePadChangesCompare(padId) {
+  async deletePadChanges(padId) {
     const [result] = await this.connection.execute(
-      'DELETE FROM pad_version_changes_compare WHERE pad_id = ?',
+      'DELETE FROM pad_version_changes WHERE pad_id = ?',
       [padId]
     );
     console.log(`🗑️  删除旧记录: ${result.affectedRows} 条`);
@@ -971,15 +968,16 @@ class DatabaseManager {
   }
 
   /**
-   * 批量插入变更记录到对比表
+   * 批量插入变更记录（使用 REPLACE INTO 自动处理主键冲突）
    */
-  async insertChangesCompare(changes) {
+  async insertChanges(changes) {
     if (changes.length === 0) return;
 
-    console.log(`💾 开始保存 ${changes.length} 条变更记录到对比表...`);
+    console.log(`💾 开始保存 ${changes.length} 条变更记录...`);
       
+    // 使用 REPLACE INTO 自动处理主键冲突（pad_id + seq_order）
     const query = `
-      INSERT INTO pad_version_changes_compare 
+      REPLACE INTO pad_version_changes 
       (pad_id, seq_order, behavior, author, content, add_start_time, add_end_time, delete_start_time, delete_end_time)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
@@ -1013,10 +1011,10 @@ class DatabaseManager {
   }
 
   /**
-   * 从临时快照表导出到对比表
+   * 从临时快照表导出到变更表
    */
   async exportSnapshotsToChanges(padId) {
-    console.log('\n📤 导出最新快照数据到对比表...');
+    console.log('\n📤 导出最新快照数据到变更表...');
     
     // 只获取最新版本的快照
     const [snapshots] = await this.connection.execute(
@@ -1060,8 +1058,8 @@ class DatabaseManager {
       };
     });
 
-    await this.insertChangesCompare(allChanges);
-    console.log(`✅ 成功导出 ${allChanges.length} 条变更记录到 pad_version_changes_compare`);
+    await this.insertChanges(allChanges);
+    console.log(`✅ 成功导出 ${allChanges.length} 条变更记录到 pad_version_changes`);
   }
 }
 
@@ -1294,19 +1292,18 @@ class PadSnapshotGenerator {
 
       await this.db.insertTempSnapshots(snapshots);
 
-      // 步骤3: 导出到对比表
-      console.log('\n📤 导出最新快照数据到对比表...');
-      await this.db.ensureChangesCompareTable();
-      await this.db.ensureChangesCompareTable();
+      // 步骤3: 导出到变更表
+      console.log('\n📤 导出最新快照数据到变更表...');
+      await this.db.ensureChangesTable();
 
       // 检查是否已存在该 pad 的数据
       const [existing] = await this.db.connection.execute(
-        'SELECT COUNT(*) as count FROM pad_version_changes_compare WHERE pad_id = ?',
+        'SELECT COUNT(*) as count FROM pad_version_changes WHERE pad_id = ?',
         [padId]
       );
       
       if (existing[0].count > 0) {
-        await this.db.deletePadChangesCompare(padId);
+        await this.db.deletePadChanges(padId);
       }
 
       await this.db.exportSnapshotsToChanges(padId);
@@ -1326,7 +1323,7 @@ class PadSnapshotGenerator {
       const totalDeletions = snapshots[snapshots.length - 1].operation_history.filter(op => op.behavior === 'deleted').length;
       console.log(`累积删除操作数: ${totalDeletions}`);
       console.log(`验证错误数: ${this.validationErrors.length}`);
-      console.log(`输出表: pad_version_changes_compare`);
+      console.log(`输出表: pad_version_changes`);
       
       if (this.validationErrors.length > 0) {
         console.log(`\n⚠️ 警告: 发现 ${this.validationErrors.length} 个版本验证失败`);
@@ -1388,10 +1385,10 @@ async function main() {
   1. 从 Etherpad store 重建版本内容到 pad_version_contents_temp
   2. 从 pad_version_contents_temp 读取版本数据
   3. 生成快照到临时表 pad_version_snapshots_temp
-  4. 导出到对比表 pad_version_changes_compare
+  4. 导出到变更表 pad_version_changes
   5. 自动清理所有临时表
   
-  数据流向: store → pad_version_contents_temp → pad_version_snapshots_temp → pad_version_changes_compare
+  数据流向: store → pad_version_contents_temp → pad_version_snapshots_temp → pad_version_changes
     `);
     process.exit(0);
   }
