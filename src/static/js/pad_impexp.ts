@@ -87,6 +87,7 @@ const padimpexp = (() => {
       'padHasData',
       'maxFileSize',
       'permission',
+      'wrongFileType',
     ];
     const msg = html10n.get(`pad.impexp.${known.indexOf(status) !== -1 ? status : 'copypaste'}`);
 

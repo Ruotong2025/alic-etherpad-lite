@@ -116,23 +116,15 @@ const doImport = async (req:any, res:any, padId:string, authorId:string) => {
   // ensure this is a file ending we know, else we change the file ending to .txt
   // this allows us to accept source code files like .c or .java
   const fileEnding = path.extname(files.file[0].originalFilename).toLowerCase();
-  const knownFileEndings =
-    ['.txt', '.doc', '.docx', '.pdf', '.odt', '.html', '.htm', '.etherpad', '.rtf'];
-  const fileEndingUnknown = (knownFileEndings.indexOf(fileEnding) < 0);
+  
+  // Only allow HTML and TXT files
+  const allowedFileEndings = ['.txt', '.html', '.htm'];
+  const fileEndingAllowed = (allowedFileEndings.indexOf(fileEnding) >= 0);
 
-  if (fileEndingUnknown) {
-    // the file ending is not known
-
-    if (settings.allowUnknownFileEnds === true) {
-      // we need to rename this file with a .txt ending
-      const oldSrcFile = srcFile;
-
-      srcFile = path.join(path.dirname(srcFile), `${path.basename(srcFile, fileEnding)}.txt`);
-      await fs.rename(oldSrcFile, srcFile);
-    } else {
-      logger.warn(`Not allowing unknown file type to be imported: ${fileEnding}`);
-      throw new ImportError('uploadFailed');
-    }
+  if (!fileEndingAllowed) {
+    // the file ending is not allowed
+    logger.warn(`File type not allowed. Only HTML and TXT files are accepted: ${fileEnding}`);
+    throw new ImportError('wrongFileType');
   }
 
   const destFile = path.join(tmpDirectory, `etherpad_import_${randNum}.${exportExtension}`);
@@ -182,9 +174,10 @@ const doImport = async (req:any, res:any, padId:string, authorId:string) => {
     const buf = await fs.readFile(destFile);
 
     // Check if there are only ascii chars in the uploaded file
+    // Skip this check for HTML files as they can contain UTF-8 characters
     const isAscii = !Array.prototype.some.call(buf, (c) => (c > 240));
 
-    if (!isAscii) {
+    if (!isAscii && !fileIsHTML) {
       logger.warn('Attempt to import non-ASCII file');
       throw new ImportError('uploadFailed');
     }
@@ -210,9 +203,12 @@ const doImport = async (req:any, res:any, padId:string, authorId:string) => {
   if (!directDatabaseAccess) {
     if (importHandledByPlugin || useConverter || fileIsHTML) {
       try {
+        logger.info(`Attempting to import HTML, file size: ${text.length} bytes`);
         await importHtml.setPadHTML(pad, text, authorId);
+        logger.info('HTML import successful');
       } catch (err:any) {
-        logger.warn(`Error importing, possibly caused by malformed HTML: ${err.stack || err}`);
+        logger.error(`Error importing HTML: ${err.stack || err}`);
+        throw new ImportError('convertFailed', `Failed to parse HTML: ${err.message}`);
       }
     } else {
       await pad.setText(text, authorId);

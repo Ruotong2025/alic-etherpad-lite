@@ -186,6 +186,7 @@
 	"pad.impexp.uploadFailed": "上载失败，请重试",
 	"pad.impexp.importfailed": "导入失败",
 	"pad.impexp.copypaste": "请复制粘贴",
+	"pad.impexp.wrongFileType": "Wrong file format. Please select HTML or TXT file",
 	"pad.impexp.exportdisabled": "{{type}} 格式的导出被禁用。有关详情，请与您的系统管理员联系。",
 	"pad.impexp.maxFileSize": "文件太大。 请与您的站点管理员联系以增加允许导入的文件大小"
 }

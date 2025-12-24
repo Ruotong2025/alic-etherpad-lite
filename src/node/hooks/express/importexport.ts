@@ -76,8 +76,10 @@ exports.expressCreateServer = (hookName:string, args:ArgsExpressType, cb:Functio
     (async () => {
       // @ts-ignore
       const {session: {user} = {}} = req;
+      // Use a default userName when authentication is not required
+      const userName = req.cookies.token || 'anonymous';
       const {accessStatus, authorID: authorId} = await securityManager.checkAccess(
-          req.params.pad, req.cookies.sessionID, req.cookies.token, user);
+          req.params.pad, req.cookies.sessionID, userName, user);
       if (accessStatus !== 'grant' || !webaccess.userCanModify(req.params.pad, req)) {
         return res.status(403).send('Forbidden');
       }

@@ -184,6 +184,7 @@
   "pad.impexp.uploadFailed": "The upload failed, please try again",
   "pad.impexp.importfailed": "Import failed",
   "pad.impexp.copypaste": "Please copy paste",
+  "pad.impexp.wrongFileType": "Wrong file format. Please select HTML or TXT file",
   "pad.impexp.exportdisabled": "Exporting as {{type}} format is disabled. Please contact your system administrator for details.",
   "pad.impexp.maxFileSize": "File too big. Contact your site administrator to increase the allowed file size for import"
 }
