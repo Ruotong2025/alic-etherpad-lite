@@ -1,13 +1,22 @@
 /**
- * Pad 版本内容重建工具 - HTTP API 版本
+ * Pad 版本内容重建工具 - HTTP API 版本（整合版）
  * 不存储到数据库，而是通过 HTTP 返回 JSON 数据
  * 
+ * 功能说明：
+ *   - 支持两种输出模式：标准模式和 Base64 编码模式
+ *   - 标准模式：过滤控制字符，适合小数据量
+ *   - Base64 模式：完全避免 JSON 转义问题，适合大数据量和远程 SSH 调用
+ * 
  * 使用方法: 
- *   node --require tsx/cjs src/node/scheduler/etherpad_changes/PadContentRebuildAPI.js <padId> [startRev] [endRev]
+ *   node --require tsx/cjs src/node/scheduler/etherpad_changes/PadContentRebuildAPI.js <padId> [startRev] [endRev] [--base64]
  * 
  * 示例:
+ *   # 标准模式（默认）
  *   cd src && node --require tsx/cjs node/scheduler/etherpad_changes/PadContentRebuildAPI.js room-229
  *   cd src && node --require tsx/cjs node/scheduler/etherpad_changes/PadContentRebuildAPI.js room-229 0 10
+ * 
+ *   # Base64 编码模式（推荐用于大数据量和远程调用）
+ *   cd src && node --require tsx/cjs node/scheduler/etherpad_changes/PadContentRebuildAPI.js room-229 0 10 --base64
  */
 
 'use strict';
@@ -40,16 +49,20 @@ console.log = originalConsoleLog;
 const args = process.argv.slice(2);
 if (args.length < 1) {
   console.error(JSON.stringify({
-    error: 'Missing padId parameter',
-    usage: 'node PadContentRebuildAPI.js <padId> [startRev] [endRev]',
-    example: 'node PadContentRebuildAPI.js room-229 0 10'
+    error: '缺少 padId 参数',
+    usage: 'node PadContentRebuildAPI.js <padId> [startRev] [endRev] [--base64]',
+    example: 'node PadContentRebuildAPI.js room-229 0 10 --base64'
   }));
   process.exit(1);
 }
 
-const padId = args[0];
-const startRev = args[1] ? parseInt(args[1]) : null;
-const endRev = args[2] ? parseInt(args[2]) : null;
+// 检查是否使用 Base64 编码模式
+const useBase64 = args.includes('--base64');
+const filteredArgs = args.filter(arg => arg !== '--base64');
+
+const padId = filteredArgs[0];
+const startRev = filteredArgs[1] ? parseInt(filteredArgs[1]) : null;
+const endRev = filteredArgs[2] ? parseInt(filteredArgs[2]) : null;
 
 /**
  * 格式化时间戳为香港时间
@@ -61,6 +74,36 @@ function formatHKTime(timestamp) {
   const hkDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
   return `${hkDate.getUTCFullYear()}-${pad(hkDate.getUTCMonth() + 1)}-${pad(hkDate.getUTCDate())} ` +
     `${pad(hkDate.getUTCHours())}:${pad(hkDate.getUTCMinutes())}:${pad(hkDate.getUTCSeconds())}.${padMs(hkDate.getUTCMilliseconds())}`;
+}
+
+/**
+ * 安全的 JSON 字符串化 - 确保所有字符都被正确转义
+ * 移除可能导致 JSON 解析失败的控制字符
+ */
+function safeStringify(obj) {
+  return JSON.stringify(obj, (key, value) => {
+    // 如果是字符串类型，确保特殊字符被正确处理
+    if (typeof value === 'string') {
+      // 移除或替换可能导致问题的控制字符
+      return value
+        .replace(/[\u0000-\u0008\u000B-\u000C\u000E-\u001F\u007F-\u009F]/g, '') // 移除控制字符
+        .replace(/\uFEFF/g, ''); // 移除 BOM (Byte Order Mark)
+    }
+    return value;
+  });
+}
+
+/**
+ * Base64 编码内容 - 用于避免 JSON 转义问题
+ * 适合大数据量和远程 SSH 调用
+ */
+function encodeToBase64(content) {
+  if (!content) return '';
+  try {
+    return Buffer.from(content, 'utf8').toString('base64');
+  } catch (error) {
+    return '';
+  }
 }
 
 /**
@@ -147,21 +190,31 @@ async function rebuildPadContent() {
           content = content.slice(0, -1);
         }
 
-        // 构建结果
+        // 构建结果 - 根据模式选择编码方式
         const record = {
           revision: rev,
           success: true,
           pad_id: padId,
-          content: content,
           author: author || '',
           timestamp: timestamp || Date.now(),
           formatted_timestamp: formatHKTime(timestamp || Date.now()),
-          changeset: changeset,
-          attribs: atext.attribs || '',
           text_length: content.length,
           line_count: (content.match(/\n/g) || []).length + 1,
           change_summary: `${oldText.length} -> ${newText.length} chars`
         };
+
+        // 根据模式添加内容字段
+        if (useBase64) {
+          // Base64 编码模式 - 避免 JSON 转义问题
+          record.content_base64 = encodeToBase64(content);
+          record.changeset_base64 = encodeToBase64(changeset);
+          record.attribs_base64 = encodeToBase64(atext.attribs || '');
+        } else {
+          // 标准模式 - 直接存储（会被 safeStringify 过滤控制字符）
+          record.content = content;
+          record.changeset = changeset;
+          record.attribs = atext.attribs || '';
+        }
 
         results.push(record);
         successCount++;
@@ -177,7 +230,7 @@ async function rebuildPadContent() {
     }
 
     // 返回完整结果
-    return {
+    const result = {
       success: true,
       pad_id: padId,
       head_revision: headRevision,
@@ -193,6 +246,14 @@ async function rebuildPadContent() {
       versions: results
     };
 
+    // 如果使用 Base64 模式，添加标记
+    if (useBase64) {
+      result.encoding = 'base64';
+      result.note = '内容使用 Base64 编码，需要解码后使用';
+    }
+
+    return result;
+
   } catch (error) {
     return {
       success: false,
@@ -204,8 +265,20 @@ async function rebuildPadContent() {
 
 // 执行并输出 JSON
 (async () => {
-  const result = await rebuildPadContent();
-  console.log(JSON.stringify(result, null, 2));
-  process.exit(result.success ? 0 : 1);
+  try {
+    const result = await rebuildPadContent();
+    // 使用安全的 JSON 字符串化方法，不使用格式化以减少输出大小
+    const jsonOutput = safeStringify(result);
+    console.log(jsonOutput);
+    process.exit(result.success ? 0 : 1);
+  } catch (error) {
+    // 如果发生意外错误，输出错误信息
+    console.log(safeStringify({
+      success: false,
+      error: error.message,
+      stack: error.stack
+    }));
+    process.exit(1);
+  }
 })();
 
