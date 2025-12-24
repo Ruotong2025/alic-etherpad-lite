@@ -12,3 +12,5 @@ CREATE TABLE `pad_version_changes` (
   PRIMARY KEY (`pad_id`, `seq_order`) USING BTREE COMMENT 'pad_id和seq_order联合主键，保证唯一性'
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = 'Pad版本变更详细记录表' ROW_FORMAT = Dynamic;
 
+
+

@@ -185,6 +185,7 @@ const sendClientReady = (isReconnect) => {
   // PURE USERNAME-BASED: Extract userName from URL parameters (NO TOKEN/COOKIE)
   const urlParams = new URLSearchParams(window.location.search);
   const userNameFromUrl = urlParams.get('userName');
+  const roomNameFromUrl = urlParams.get('roomName');
   
   if (!userNameFromUrl || userNameFromUrl.trim() === '') {
     // NO userName provided - show error and stop
@@ -194,6 +195,9 @@ const sendClientReady = (isReconnect) => {
   }
   
   console.log(`[NO-TOKEN] Using userName from URL: ${userNameFromUrl}`);
+  if (roomNameFromUrl) {
+    console.log(`[NO-TOKEN] Using roomName from URL: ${roomNameFromUrl}`);
+  }
 
   // NO TOKEN GENERATION - pure userName-based approach
   
@@ -271,9 +275,10 @@ const sendClientReady = (isReconnect) => {
     userInfo,
     padId,
     client_rev: clientVars.rev,
+    roomName: roomNameFromUrl || undefined,  // 添加 roomName 参数
   };
 
-  console.log(`[NO-TOKEN] Sending CLIENT_READY with userName: ${userInfo.name}`);
+  console.log(`[NO-TOKEN] Sending CLIENT_READY with userName: ${userInfo.name}${roomNameFromUrl ? `, roomName: ${roomNameFromUrl}` : ''}`);
   socket.emit('message', msg);
 };
 

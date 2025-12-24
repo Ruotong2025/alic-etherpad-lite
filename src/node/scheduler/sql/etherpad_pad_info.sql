@@ -1,6 +1,7 @@
 DROP TABLE IF EXISTS `etherpad_pad_info`;
 CREATE TABLE `etherpad_pad_info`  (
   `pad_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT 'Pad ID，去掉 pad: 前缀',
+  `room_name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'roomName：房间名称，从 URL 参数获取',
   `full_text` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL COMMENT 'atext.text：文本内容，pad 的全文本（带换行符），用户编辑内容',
   `attribs` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'atext.attribs：文本属性，每个字符的属性编码，用于标记作者、样式等',
   `pool` json NULL COMMENT 'pool.numToAttrib：属性池，数字映射到属性名和作者 ID，例如 \"0\":[\"author\",\"a.jCyj8rIjIeyLD9CR\"] 表示作者',

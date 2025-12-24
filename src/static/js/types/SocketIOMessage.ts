@@ -186,6 +186,7 @@ export type ClientReadyMessage = {
   userInfo: UserInfo,
   reconnect?: boolean
   client_rev?: number
+  roomName?: string  // 添加 roomName 参数
 }
 
 export type ClientSaveRevisionMessage = {

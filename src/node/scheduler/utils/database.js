@@ -174,9 +174,10 @@ class DatabaseManager {
     try {
       const query = `
         INSERT INTO etherpad_pad_info 
-        (pad_id, full_text, attribs, pool, next_num, head, chat_head, public_status, saved_revisions, create_time, update_time)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+        (pad_id, room_name, full_text, attribs, pool, next_num, head, chat_head, public_status, saved_revisions, create_time, update_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
         ON DUPLICATE KEY UPDATE
+          room_name = VALUES(room_name),
           full_text = VALUES(full_text),
           attribs = VALUES(attribs),
           pool = VALUES(pool),
@@ -190,6 +191,7 @@ class DatabaseManager {
       
       await this.connection.execute(query, [
         data.padId,
+        data.roomName || null,  // room_name：如果没有提供，设置为 null（不报错）
         data.fullText || null,
         data.attribs || null,
         data.pool ? JSON.stringify(data.pool) : null,
@@ -223,7 +225,7 @@ class DatabaseManager {
   async getPadInfo(padId) {
     try {
       const query = `
-        SELECT pad_id, full_text, attribs, pool, next_num, head, chat_head, 
+        SELECT pad_id, room_name, full_text, attribs, pool, next_num, head, chat_head, 
                public_status, saved_revisions, create_time, update_time
         FROM etherpad_pad_info 
         WHERE pad_id = ? 
@@ -236,6 +238,7 @@ class DatabaseManager {
       const row = rows[0];
       return {
         padId: row.pad_id,
+        roomName: row.room_name,  // room_name 在第二位
         fullText: row.full_text,
         attribs: row.attribs,
         pool: row.pool ? JSON.parse(row.pool) : null,

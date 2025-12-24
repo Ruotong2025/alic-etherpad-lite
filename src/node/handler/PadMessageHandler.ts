@@ -882,6 +882,13 @@ const handleClientReady = async (socket:any, message: ClientReadyMessage) => {
   // load the pad-object from the database
   const pad = await padManager.getPad(sessionInfo.padId, null, sessionInfo.author);
 
+  // 如果消息中包含 roomName，设置到 pad 对象并保存
+  if (message.roomName) {
+    pad.setRoomName(message.roomName);
+    await pad.saveToDatabase();
+    console.log(`[ROOM_NAME] Set roomName for pad ${sessionInfo.padId}: ${message.roomName}`);
+  }
+
   // these db requests all need the pad object (timestamp of latest revision, author data)
   const authors = pad.getAllAuthors();
 

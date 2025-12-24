@@ -636,7 +636,8 @@ function parsePadData(value) {
       head: data.head || null,
       chatHead: data.chatHead !== undefined ? data.chatHead : null,
       publicStatus: data.publicStatus !== undefined ? data.publicStatus : null,
-      savedRevisions: data.savedRevisions || null
+      savedRevisions: data.savedRevisions || null,
+      roomName: data.roomName || null  // 如果没有 roomName 字段，设置为 null（不报错）
     };
   } catch (error) {
     console.error('❌ 解析pad数据失败:', error);

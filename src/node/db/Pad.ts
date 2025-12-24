@@ -48,6 +48,7 @@ class Pad {
     private publicStatus: boolean;
     private id: string;
     private savedRevisions: any[];
+    private roomName?: string;  // 添加 roomName 属性
   /**
    * @param id
    * @param [database] - Database object to access this pad's records (and only this pad's records;
@@ -65,6 +66,7 @@ class Pad {
     this.publicStatus = false;
     this.id = id;
     this.savedRevisions = [];
+    this.roomName = undefined;  // 初始化 roomName
   }
 
   apool() {
@@ -87,6 +89,16 @@ class Pad {
 
   getPublicStatus() {
     return this.publicStatus;
+  }
+
+  // 设置 roomName
+  setRoomName(roomName?: string) {
+    this.roomName = roomName;
+  }
+
+  // 获取 roomName
+  getRoomName() {
+    return this.roomName;
   }
 
   /**
@@ -150,6 +162,7 @@ class Pad {
     delete o.db;
     // @ts-ignore
     delete o.id;
+    // roomName 会被包含在 JSON 中
     return o;
   }
 

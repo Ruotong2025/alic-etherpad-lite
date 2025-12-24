@@ -50,7 +50,8 @@ class EtherpadProcessor {
         head: padData.head,
         chatHead: padData.chatHead,
         publicStatus: padData.publicStatus,
-        savedRevisions: padData.savedRevisions
+        savedRevisions: padData.savedRevisions,
+        roomName: padData.roomName || null  // roomName：如果没有，设置为 null（容错处理）
       };
 
       await this.db.insertPadInfo(insertData);
