@@ -82,6 +82,12 @@
   font-size: .9em;
 }
 
+/* Fix content padding in timeslider */
+.timeslider #innerdocbody {
+  padding-left: 55px !important;
+  padding-right: 55px !important;
+}
+
 @media (max-width: 800px) {
 
   #slider-btn-container {
@@ -94,5 +100,11 @@
   }
   #slider-btn-container #playpause_button_icon:before {
     font-size: 18px;
+  }
+  
+  /* Reduce padding on mobile */
+  .timeslider #innerdocbody {
+    padding-left: 20px !important;
+    padding-right: 20px !important;
   }
 }
