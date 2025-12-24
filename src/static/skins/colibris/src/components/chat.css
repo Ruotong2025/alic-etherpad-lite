@@ -23,6 +23,7 @@
   color: #485365;
   color: var(--text-color);
   right: 30px;
+  display: none !important; /* Force hide chat icon */
 }
 
 #chatbox.stickyChat .chat-content {

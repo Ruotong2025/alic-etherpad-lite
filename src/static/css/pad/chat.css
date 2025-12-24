@@ -123,7 +123,7 @@
 #chaticon {
   background-color: #fff;
   cursor: pointer;
-  display: none;
+  display: none !important; /* Force hide chat icon */
   padding: 5px;
 }
 #chaticon a {

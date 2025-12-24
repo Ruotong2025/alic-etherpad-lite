@@ -506,16 +506,17 @@ const pad = {
       }, 0);
       const optionsStickyChat = $('#options-stickychat');
       optionsStickyChat.on('click', () => { chat.stickToScreen(); });
+      // Disabled auto-showing chat on page load
       // if we have a cookie for always showing chat then show it
-      if (padcookie.getPref('chatAlwaysVisible')) {
-        chat.stickToScreen(true); // stick it to the screen
-        optionsStickyChat.prop('checked', true); // set the checkbox to on
-      }
+      // if (padcookie.getPref('chatAlwaysVisible')) {
+      //   chat.stickToScreen(true); // stick it to the screen
+      //   optionsStickyChat.prop('checked', true); // set the checkbox to on
+      // }
       // if we have a cookie for always showing chat then show it
-      if (padcookie.getPref('chatAndUsers')) {
-        chat.chatAndUsers(true); // stick it to the screen
-        $('#options-chatandusers').prop('checked', true); // set the checkbox to on
-      }
+      // if (padcookie.getPref('chatAndUsers')) {
+      //   chat.chatAndUsers(true); // stick it to the screen
+      //   $('#options-chatandusers').prop('checked', true); // set the checkbox to on
+      // }
       if (padcookie.getPref('showAuthorshipColors') === false) {
         pad.changeViewOption('showAuthorColors', false);
       }
@@ -580,7 +581,10 @@ const pad = {
       $('#chaticon').hide();
       $('#options-chatandusers').parent().hide();
       $('#options-stickychat').parent().hide();
-    } else if (!settings.hideChat) { $('#chaticon').show(); }
+    } else if (!settings.hideChat) { 
+      // Force hide chat icon
+      $('#chaticon').hide(); 
+    }
 
     $('body').addClass(window.clientVars.readonly ? 'readonly' : 'readwrite');
 
@@ -752,22 +756,24 @@ const pad = {
     }, 1000);
   },
   determineChatVisibility: (asNowConnectedFeedback) => {
-    const chatVisCookie = padcookie.getPref('chatAlwaysVisible');
-    if (chatVisCookie) { // if the cookie is set for chat always visible
-      chat.stickToScreen(true); // stick it to the screen
-      $('#options-stickychat').prop('checked', true); // set the checkbox to on
-    } else {
+    // Disabled auto-showing chat
+    // const chatVisCookie = padcookie.getPref('chatAlwaysVisible');
+    // if (chatVisCookie) { // if the cookie is set for chat always visible
+    //   chat.stickToScreen(true); // stick it to the screen
+    //   $('#options-stickychat').prop('checked', true); // set the checkbox to on
+    // } else {
       $('#options-stickychat').prop('checked', false); // set the checkbox for off
-    }
+    // }
   },
   determineChatAndUsersVisibility: (asNowConnectedFeedback) => {
-    const chatAUVisCookie = padcookie.getPref('chatAndUsersVisible');
-    if (chatAUVisCookie) { // if the cookie is set for chat always visible
-      chat.chatAndUsers(true); // stick it to the screen
-      $('#options-chatandusers').prop('checked', true); // set the checkbox to on
-    } else {
+    // Disabled auto-showing chat and users
+    // const chatAUVisCookie = padcookie.getPref('chatAndUsersVisible');
+    // if (chatAUVisCookie) { // if the cookie is set for chat always visible
+    //   chat.chatAndUsers(true); // stick it to the screen
+    //   $('#options-chatandusers').prop('checked', true); // set the checkbox to on
+    // } else {
       $('#options-chatandusers').prop('checked', false); // set the checkbox for off
-    }
+    // }
   },
   determineAuthorshipColorsVisibility: () => {
     const authColCookie = padcookie.getPref('showAuthorshipColors');
