@@ -181,13 +181,24 @@ const getCollabClient = (ace2editor, serverVars, initialUserInfo, options, _pad)
   }();
 
   const handleMessageFromServer = (evt) => {
-    if (!getSocket()) return;
-    if (!evt.data) return;
+    if (!getSocket()) {
+      console.warn('[CollabClient] No socket, ignoring message');
+      return;
+    }
+    if (!evt.data) {
+      console.warn('[CollabClient] No data in message, ignoring');
+      return;
+    }
     const wrapper = evt;
-    if (wrapper.type !== 'COLLABROOM' && wrapper.type !== 'CUSTOM') return;
+    if (wrapper.type !== 'COLLABROOM' && wrapper.type !== 'CUSTOM') {
+      console.log(`[CollabClient] Ignoring message type: ${wrapper.type}`);
+      return;
+    }
     const msg = wrapper.data;
+    console.log(`[CollabClient] Handling ${msg.type} message`, msg);
 
     if (msg.type === 'NEW_CHANGES') {
+      console.log(`[CollabClient] 🔄 NEW_CHANGES received: rev ${msg.newRev}, author: ${msg.author}`);
       serverMessageTaskQueue.enqueue(async () => {
         // Avoid updating the DOM while the user is composing a character. Notes about this `await`:
         //   * `await null;` is equivalent to `await Promise.resolve(null);`, so if the user is not
@@ -203,6 +214,7 @@ const getCollabClient = (ace2editor, serverVars, initialUserInfo, options, _pad)
           // setChannelState("DISCONNECTED", "badmessage_newchanges");
           return;
         }
+        console.log(`[CollabClient] ✅ Applying changes from ${author}, rev ${rev} -> ${newRev}`);
         rev = newRev;
         editor.applyChangesToBase(changeset, author, apool);
       });

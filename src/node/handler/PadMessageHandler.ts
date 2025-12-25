@@ -754,6 +754,7 @@ const handleUserChanges = async (socket:any, message: {
 exports.updatePadClients = async (pad: PadType) => {
   // skip this if no-one is on this pad
   const roomSockets = _getRoomSockets(pad.id);
+  messageLogger.info(`[updatePadClients] Pad ${pad.id} has ${roomSockets.length} connected clients`);
   if (roomSockets.length === 0) return;
 
   // since all clients usually get the same set of changesets, store them in local cache
@@ -799,7 +800,9 @@ exports.updatePadClients = async (pad: PadType) => {
         },
       };
       try {
+        messageLogger.info(`[updatePadClients] 📤 Sending NEW_CHANGES to socket ${socket.id}: rev ${sessioninfo.rev} -> ${r}, author: ${author}`);
         socket.emit('message', msg);
+        messageLogger.info(`[updatePadClients] ✅ Successfully sent NEW_CHANGES to socket ${socket.id}`);
       } catch (err:any) {
         messageLogger.error(`Failed to notify user of new revision: ${err.stack || err}`);
         return;
@@ -917,19 +920,36 @@ const handleClientReady = async (socket:any, message: ClientReadyMessage) => {
   if (sessionInfo !== sessioninfos[socket.id]) throw new Error('client disconnected');
 
   // Check if this author is already on the pad, if yes, kick the other sessions!
+  // DISABLED: Allow same user to open multiple windows for real-time collaboration
+  // This fixes the issue where opening a shared link in multiple windows causes disconnection
   const roomSockets = _getRoomSockets(pad.id);
-
+  
+  // Count how many sessions this author has
+  let authorSessionCount = 0;
   for (const otherSocket of roomSockets) {
-    // The user shouldn't have joined the room yet, but check anyway just in case.
     if (otherSocket.id === socket.id) continue;
     const sinfo = sessioninfos[otherSocket.id];
     if (sinfo && sinfo.author === sessionInfo.author) {
-      // fix user's counter, works on page refresh or if user closes browser window and then rejoins
-      sessioninfos[otherSocket.id] = {};
-      otherSocket.leave(sessionInfo.padId);
-      otherSocket.emit('message', {disconnect: 'userdup'});
+      authorSessionCount++;
     }
   }
+  
+  if (authorSessionCount > 0) {
+    messageLogger.info(`[handleClientReady] Author ${sessionInfo.author} now has ${authorSessionCount + 1} active sessions (allowing multiple windows)`);
+  }
+  
+  // Original code that kicks duplicate users - COMMENTED OUT
+  // for (const otherSocket of roomSockets) {
+  //   // The user shouldn't have joined the room yet, but check anyway just in case.
+  //   if (otherSocket.id === socket.id) continue;
+  //   const sinfo = sessioninfos[otherSocket.id];
+  //   if (sinfo && sinfo.author === sessionInfo.author) {
+  //     // fix user's counter, works on page refresh or if user closes browser window and then rejoins
+  //     sessioninfos[otherSocket.id] = {};
+  //     otherSocket.leave(sessionInfo.padId);
+  //     otherSocket.emit('message', {disconnect: 'userdup'});
+  //   }
+  // }
 
   const {session: {user} = {}} = socket.client.request as SocketClientRequest;
   /* eslint-disable prefer-template -- it doesn't support breaking across multiple lines */
@@ -1098,12 +1118,14 @@ const handleClientReady = async (socket:any, message: ClientReadyMessage) => {
 
     // Join the pad and start receiving updates
     socket.join(sessionInfo.padId);
+    messageLogger.info(`[handleClientReady] ✅ Socket ${socket.id} joined room: ${sessionInfo.padId}`);
 
     // Send the clientVars to the Client
     socket.emit('message', {type: 'CLIENT_VARS', data: clientVars});
 
     // Save the current revision in sessioninfos, should be the same as in clientVars
     sessionInfo.rev = pad.getHeadRevisionNumber();
+    messageLogger.info(`[handleClientReady] Socket ${socket.id} initialized at rev ${sessionInfo.rev}`);
   }
 
   // Notify other users about this new user.
@@ -1336,11 +1358,17 @@ const _getRoomSockets = (padID: string) => {
   // we update to socket.io v3.
   const room = ns.adapter.rooms?.get(padID);
 
-  if (!room) return [];
+  if (!room) {
+    messageLogger.debug(`[_getRoomSockets] No room found for padID: ${padID}`);
+    return [];
+  }
 
-  return Array.from(room)
+  const sockets = Array.from(room)
     .map(socketId => ns.sockets.get(socketId))
     .filter(socket => socket);
+  
+  messageLogger.debug(`[_getRoomSockets] Found ${sockets.length} sockets in room ${padID}: ${sockets.map(s => s.id).join(', ')}`);
+  return sockets;
 };
 
 /**
@@ -1374,3 +1402,4 @@ exports.padUsers = async (padID: string) => {
 };
 
 exports.sessioninfos = sessioninfos;
+

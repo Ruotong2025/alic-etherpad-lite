@@ -358,10 +358,14 @@ const handshake = async () => {
     }
   };
 
+  socket.on('connect', () => {
+    console.log(`✅ [Socket] Connected! Socket ID: ${socket.id}`);
+  });
+
   socket.on('disconnect', (reason) => {
     // The socket.io client will automatically try to reconnect for all reasons other than "io
     // server disconnect".
-    console.log(`Socket disconnected: ${reason}`)
+    console.log(`❌ [Socket] Disconnected: ${reason}`)
     //if (reason !== 'io server disconnect' || reason !== 'ping timeout') return;
     socketReconnecting();
   });
@@ -480,10 +484,20 @@ class MessageQueue {
 
   enqueue(...msgs) {
     if (this._cc == null) {
+      console.log(`[MessageQueue] Queuing ${msgs.length} messages (collabClient not ready yet)`);
       this._q.push(...msgs);
     } else {
-      while (this._q.length > 0) this._cc.handleMessageFromServer(this._q.shift());
-      for (const msg of msgs) this._cc.handleMessageFromServer(msg);
+      // Flush queued messages first
+      while (this._q.length > 0) {
+        const queuedMsg = this._q.shift();
+        console.log(`[MessageQueue] Processing queued message:`, queuedMsg.type);
+        this._cc.handleMessageFromServer(queuedMsg);
+      }
+      // Process new messages
+      for (const msg of msgs) {
+        console.log(`[MessageQueue] Processing message:`, msg.type, msg);
+        this._cc.handleMessageFromServer(msg);
+      }
     }
   }
 }
