@@ -126,6 +126,26 @@ class TextLinesMutator {
   }
 
   /**
+   * Validates _curLine to detect state desynchronization.
+   * 
+   * CRITICAL: We should NOT auto-correct _curLine during normal changeset application,
+   * as this can cause text/attribute mismatches. This method only logs warnings.
+   * 
+   * Auto-correction only happens in _putCurLineInSplice when trying to access
+   * a line that doesn't exist.
+   */
+  _validateCurLine() {
+    const totalLines = this._linesLength();
+    
+    if (this._curLine > totalLines) {
+      console.error(`[TextLinesMutator._validateCurLine] WARNING: _curLine (${this._curLine}) > totalLines (${totalLines}). ` +
+        `curCol=${this._curCol}, inSplice=${this._inSplice}. ` +
+        `This will likely cause issues when accessing lines.`);
+      // DO NOT auto-correct here - let it fail naturally so we can see the real problem
+    }
+  }
+
+  /**
    * Incorporates current line into the splice and marks its old position to be deleted.
    *
    * @returns {number} the index of the added line in curSplice
@@ -133,12 +153,61 @@ class TextLinesMutator {
   _putCurLineInSplice() {
     if (!this._isCurLineInSplice()) {
       // @ts-ignore
-      this._curSplice.push(this._linesGet(this._curSplice[0] + this._curSplice[1]));
+      const lineIndex = this._curSplice[0] + this._curSplice[1];
+      const totalLines = this._linesLength();
+      
+      // CRITICAL CHECK: Detect state desynchronization
+      if (lineIndex >= totalLines) {
+        console.error(`[TextLinesMutator._putCurLineInSplice] CRITICAL: State desynchronization detected! ` +
+          `Trying to access line ${lineIndex} but document only has ${totalLines} lines. ` +
+          `curLine=${this._curLine}, curSplice=[${this._curSplice[0]},${this._curSplice[1]}], curCol=${this._curCol}. ` +
+          `This usually happens during timeslider navigation or after large deletions.`);
+        
+        // Try to recover by using the last available line or empty string
+        const line = totalLines > 0 ? this._linesGet(totalLines - 1) : '';
+        // @ts-ignore
+        this._curSplice.push(line || '');
+        // @ts-ignore
+        this._curSplice[1]++;
+        
+        // Return a safe sline value
+        const sline = this._curSplice.length - 1;
+        console.warn(`[TextLinesMutator._putCurLineInSplice] Recovery: Using sline=${sline}, ` +
+          `pushed line from index ${totalLines > 0 ? totalLines - 1 : 'N/A'}`);
+        return sline;
+      }
+      
+      const line = this._linesGet(lineIndex);
+      // Safety check: ensure we're not adding undefined/null to the splice
+      if (line === undefined || line === null) {
+        console.error(`[TextLinesMutator._putCurLineInSplice] Line at index ${lineIndex} is ${line}, ` +
+          `total lines: ${totalLines}, curSplice: ${JSON.stringify(this._curSplice.slice(0, 2))}, ` +
+          `curLine: ${this._curLine}, curCol: ${this._curCol}`);
+        // Push an empty line instead of null/undefined to prevent substring errors
+        // @ts-ignore
+        this._curSplice.push('');
+      } else {
+        // @ts-ignore
+        this._curSplice.push(line);
+      }
       // @ts-ignore
       this._curSplice[1]++;
     }
-    // TODO should be the same as this._curSplice.length - 1
-    return 2 + this._curLine - this._curSplice[0];
+    // Calculate the index where the current line should be in the splice
+    const sline = 2 + this._curLine - this._curSplice[0];
+    
+    // Validate that sline is within bounds
+    if (sline < 2 || sline >= this._curSplice.length) {
+      console.error(`[TextLinesMutator._putCurLineInSplice] Calculated sline (${sline}) is out of bounds. ` +
+        `curSplice.length=${this._curSplice.length}, curLine=${this._curLine}, curSplice[0]=${this._curSplice[0]}`);
+      // Ensure the array has the element at sline
+      while (this._curSplice.length <= sline) {
+        // @ts-ignore
+        this._curSplice.push('');
+      }
+    }
+    
+    return sline;
   }
 
   /**
@@ -308,17 +377,45 @@ class TextLinesMutator {
       // There are no additional lines. Although the line is put into splice, curLine is not
       // increased because there may be more chars in the line (newline is not reached).
       const sline = this._putCurLineInSplice();
-      if (!this._curSplice[sline]) {
+      const currentLine = this._curSplice[sline];
+      
+      // Enhanced error checking with detailed diagnostics
+      if (currentLine === undefined || currentLine === null) {
         const err = new Error(
           'curSplice[sline] not populated, actual curSplice contents is ' +
-          `${JSON.stringify(this._curSplice)}. Possibly related to ` +
-          'https://github.com/ether/etherpad-lite/issues/2802');
+          `${JSON.stringify(this._curSplice)}. ` +
+          `sline=${sline}, _curLine=${this._curLine}, _curCol=${this._curCol}, ` +
+          `_curSplice.length=${this._curSplice.length}, text="${text}". ` +
+          'Possibly related to https://github.com/ether/etherpad-lite/issues/2802');
         console.error(err.stack || err.toString());
-      }
-      // @ts-ignore
-      this._curSplice[sline] = this._curSplice[sline].substring(0, this._curCol) + text +
+        
+        // If sline is out of bounds, we have a serious problem
+        if (sline >= this._curSplice.length) {
+          console.error(`[TextLinesMutator.insert] CRITICAL: sline (${sline}) >= curSplice.length (${this._curSplice.length})`);
+          // Try to fix by ensuring the array has enough elements
+          while (this._curSplice.length <= sline) {
+            // @ts-ignore
+            this._curSplice.push('\n');
+          }
+        }
+        
+        // Initialize with the text to prevent substring error
         // @ts-ignore
-        this._curSplice[sline].substring(this._curCol);
+        this._curSplice[sline] = text;
+        this._curCol += text.length;
+        return;
+      }
+      
+      // Additional check: empty string is technically valid but might indicate a problem
+      if (typeof currentLine === 'string' && currentLine === '' && this._curCol > 0) {
+        console.warn(`[TextLinesMutator.insert] Empty line at sline=${sline}, but curCol=${this._curCol} > 0. ` +
+          `This might indicate a synchronization issue.`);
+      }
+      
+      // @ts-ignore
+      this._curSplice[sline] = currentLine.substring(0, this._curCol) + text +
+        // @ts-ignore
+        currentLine.substring(this._curCol);
       this._curCol += text.length;
     }
   }

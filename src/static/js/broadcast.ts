@@ -171,12 +171,17 @@ const loadBroadcastJS = (socket, sendSocketMsg, fireWhenAllScriptsAreLoaded, Bro
       const goToLineNumber = (lineNumber) => {
         // Sets the Y scrolling of the browser to go to this line
         const line = $('#innerdocbody').find(`div:nth-child(${lineNumber + 1})`);
+        // Check if the line element exists before accessing offsetTop
+        if (!line || !line[0]) {
+          console.warn(`[broadcast.ts] Line ${lineNumber} not found in DOM, skipping scroll`);
+          return;
+        }
         const newY = $(line)[0].offsetTop;
         const ecb = document.getElementById('editorcontainerbox');
         // Chrome 55 - 59 bugfix
-        if (ecb.scrollTo) {
+        if (ecb && ecb.scrollTo) {
           ecb.scrollTo({top: newY, behavior: 'auto'});
-        } else {
+        } else if (ecb) {
           $('#editorcontainerbox').scrollTop(newY);
         }
       };
