@@ -47,9 +47,49 @@ const init = () => {
     // set the title
     document.title = `${padId.replace(/_+/g, ' ')} | ${document.title}`;
 
-    // PURE USERNAME-BASED: Extract userName from URL parameters (NO TOKEN)
+    // PURE USERNAME-BASED: Extract userName and roomName from URL parameters (NO TOKEN)
     const urlParams = new URLSearchParams(window.location.search);
-    const userNameFromUrl = urlParams.get('userName');
+    let userNameFromUrl = urlParams.get('userName');
+    let roomNameFromUrl = urlParams.get('roomName');
+    const encryptedUserName = urlParams.get('u'); // Encrypted userName from share link
+    const encryptedRoomName = urlParams.get('r'); // Encrypted roomName from share link
+    
+    // Simple decryption utility (matching pad_editbar.ts)
+    const decrypt = (encrypted) => {
+      const key = 'EtherpadShare2024';
+      const base64 = encrypted.replace(/-/g, '+').replace(/_/g, '/');
+      const padding = (4 - (base64.length % 4)) % 4;
+      const padded = base64 + '='.repeat(padding);
+      const decoded = atob(padded);
+      let decrypted = '';
+      for (let i = 0; i < decoded.length; i++) {
+        const charCode = decoded.charCodeAt(i) ^ key.charCodeAt(i % key.length);
+        decrypted += String.fromCharCode(charCode);
+      }
+      return decrypted;
+    };
+    
+    // Decrypt userName if it's encrypted (from share link)
+    if (!userNameFromUrl && encryptedUserName) {
+      try {
+        userNameFromUrl = decrypt(encryptedUserName);
+        console.log(`[TIMESLIDER-NO-TOKEN] Decrypted userName from share link: ${userNameFromUrl.substring(0, 3)}...`);
+      } catch (e) {
+        console.error('[TIMESLIDER-NO-TOKEN] Failed to decrypt userName:', e);
+        userNameFromUrl = null;
+      }
+    }
+    
+    // Decrypt roomName if it's encrypted (from share link)
+    if (!roomNameFromUrl && encryptedRoomName) {
+      try {
+        roomNameFromUrl = decrypt(encryptedRoomName);
+        console.log(`[TIMESLIDER-NO-TOKEN] Decrypted roomName from share link: ${roomNameFromUrl.substring(0, 3)}...`);
+      } catch (e) {
+        console.error('[TIMESLIDER-NO-TOKEN] Failed to decrypt roomName:', e);
+        roomNameFromUrl = null;
+      }
+    }
     
     if (!userNameFromUrl || userNameFromUrl.trim() === '') {
       // NO userName provided - show error and stop
@@ -59,6 +99,9 @@ const init = () => {
     }
     
     console.log(`[TIMESLIDER-NO-TOKEN] Using userName from URL: ${userNameFromUrl}`);
+    if (roomNameFromUrl) {
+      console.log(`[TIMESLIDER-NO-TOKEN] Using roomName from URL: ${roomNameFromUrl}`);
+    }
 
     socket = socketio.connect(exports.baseURL, '/', {query: {padId}});
 

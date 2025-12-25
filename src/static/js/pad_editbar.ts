@@ -28,6 +28,64 @@ const hooks = require('./pluginfw/hooks');
 import padutils from "./pad_utils";
 const padeditor = require('./pad_editor').padeditor;
 const padsavedrevs = require('./pad_savedrevs');
+
+/**
+ * Simple encryption/decryption utilities for userName in share links
+ * Uses Base64 encoding with a simple obfuscation to hide userName from casual viewing
+ */
+const ShareLinkCrypto = {
+  // Simple key for obfuscation (can be changed for additional security)
+  _key: 'EtherpadShare2024',
+  
+  /**
+   * Encrypt userName for share link
+   * @param {string} text - The userName to encrypt
+   * @returns {string} Encrypted string safe for URL
+   */
+  encrypt(text) {
+    if (!text) return '';
+    try {
+      // XOR with key for basic obfuscation
+      let encrypted = '';
+      for (let i = 0; i < text.length; i++) {
+        const charCode = text.charCodeAt(i) ^ this._key.charCodeAt(i % this._key.length);
+        encrypted += String.fromCharCode(charCode);
+      }
+      // Base64 encode and make URL-safe
+      return btoa(encrypted).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    } catch (e) {
+      console.error('[ShareLinkCrypto] Encryption failed:', e);
+      return text; // Fallback to original text
+    }
+  },
+  
+  /**
+   * Decrypt userName from share link
+   * @param {string} encrypted - The encrypted userName
+   * @returns {string} Decrypted userName
+   */
+  decrypt(encrypted) {
+    if (!encrypted) return '';
+    try {
+      // Restore Base64 padding and decode
+      const base64 = encrypted.replace(/-/g, '+').replace(/_/g, '/');
+      const padding = (4 - (base64.length % 4)) % 4;
+      const padded = base64 + '='.repeat(padding);
+      const decoded = atob(padded);
+      
+      // XOR with key to decrypt
+      let decrypted = '';
+      for (let i = 0; i < decoded.length; i++) {
+        const charCode = decoded.charCodeAt(i) ^ this._key.charCodeAt(i % this._key.length);
+        decrypted += String.fromCharCode(charCode);
+      }
+      return decrypted;
+    } catch (e) {
+      console.error('[ShareLinkCrypto] Decryption failed:', e);
+      return encrypted; // Fallback to original text
+    }
+  }
+};
 const _ = require('underscore');
 require('./vendors/nice-select');
 
@@ -263,7 +321,27 @@ exports.padeditbar = new class {
   }
   setEmbedLinks() {
     const padUrl = window.location.href.split('?')[0];
-    const params = '?showControls=true&showChat=true&showLineNumbers=true&useMonospaceFont=false';
+    
+    // Preserve userName and roomName from current URL for NO-TOKEN mode
+    const currentUrlParams = new URLSearchParams(window.location.search);
+    const userName = currentUrlParams.get('userName');
+    const roomName = currentUrlParams.get('roomName');
+    
+    // Build params string with ENCRYPTED userName and roomName for privacy
+    let params = '?showControls=true&showChat=true&showLineNumbers=true&useMonospaceFont=false';
+    if (userName) {
+      // Encrypt userName to protect privacy in share links
+      const encryptedUserName = ShareLinkCrypto.encrypt(userName);
+      params += `&u=${encodeURIComponent(encryptedUserName)}`;
+      console.log(`[ShareLink] Encrypted userName for share link (original: ${userName.substring(0, 3)}...)`);
+    }
+    if (roomName) {
+      // Encrypt roomName to protect privacy in share links
+      const encryptedRoomName = ShareLinkCrypto.encrypt(roomName);
+      params += `&r=${encodeURIComponent(encryptedRoomName)}`;
+      console.log(`[ShareLink] Encrypted roomName for share link (original: ${roomName.substring(0, 3)}...)`);
+    }
+    
     const props = 'width="100%" height="600" frameborder="0"';
 
     if ($('#readonlyinput').is(':checked')) {
@@ -272,11 +350,11 @@ exports.padeditbar = new class {
       const readonlyLink = `${urlParts.join('/')}/${clientVars.readOnlyId}`;
       $('#embedinput')
           .val(`<iframe name="embed_readonly" src="${readonlyLink}${params}" ${props}></iframe>`);
-      $('#linkinput').val(readonlyLink);
+      $('#linkinput').val(readonlyLink + params);
     } else {
       $('#embedinput')
           .val(`<iframe name="embed_readwrite" src="${padUrl}${params}" ${props}></iframe>`);
-      $('#linkinput').val(padUrl);
+      $('#linkinput').val(padUrl + params);
     }
   }
   checkAllIconsAreDisplayedInToolbar() {
