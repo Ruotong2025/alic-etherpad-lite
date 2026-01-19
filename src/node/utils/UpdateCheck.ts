@@ -43,6 +43,11 @@ exports.getLatestVersion = () => {
 };
 
 exports.needsUpdate = async (cb?: Function) => {
+  // 检查是否禁用了更新检查
+  if (settings.updateCheck === false) {
+    return;
+  }
+
   try {
     const info = await loadEtherpadInformations()
     if (semver.gt(info!.latestVersion, settings.getEpVersion())) {

@@ -203,6 +203,9 @@ exports.start = async () => {
     // 不中断主服务器启动，继续运行
   }
 
+  // Pad Content Rebuild API 已通过 Express 路由集成，无需单独启动
+  logger.info('✅ Pad Content Rebuild API 已集成到主服务器 (路径: /api/rebuild)');
+
   // @ts-ignore
   startDoneGate.resolve();
 

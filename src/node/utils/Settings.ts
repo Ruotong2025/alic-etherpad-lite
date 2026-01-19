@@ -109,6 +109,10 @@ exports.ttl = {
 
 exports.updateServer = "https://static.etherpad.org"
 
+/**
+ * Enable or disable automatic update checking
+ */
+exports.updateCheck = true;
 
 /*
  * Skin name.

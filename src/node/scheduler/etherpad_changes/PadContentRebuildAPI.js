@@ -1,22 +1,28 @@
 /**
- * Pad 版本内容重建工具 - HTTP API 版本（整合版）
- * 不存储到数据库，而是通过 HTTP 返回 JSON 数据
+ * Pad 版本内容重建工具 - HTTP Stream 版本
+ * 使用 HTTP 流式传输，避免缓冲区限制导致的 JSON 截断问题
  * 
  * 功能说明：
  *   - 支持两种输出模式：标准模式和 Base64 编码模式
- *   - 标准模式：过滤控制字符，适合小数据量
- *   - Base64 模式：完全避免 JSON 转义问题，适合大数据量和远程 SSH 调用
+ *   - 使用 HTTP 流式传输，逐版本发送数据，避免缓冲区限制
+ *   - 完全避免 JSON 截断问题，支持任意大小的数据
  * 
  * 使用方法: 
- *   node --require tsx/cjs src/node/scheduler/etherpad_changes/PadContentRebuildAPI.js <padId> [startRev] [endRev] [--base64]
+ *   # 启动 HTTP 流式服务器
+ *   node --require tsx/cjs src/node/scheduler/etherpad_changes/PadContentRebuildAPI.js [--port <port>]
+ *   
+ *   然后通过 HTTP GET 请求获取数据：
+ *   http://localhost:3000/rebuild?padId=room-229&startRev=0&endRev=10&useBase64=true
  * 
  * 示例:
- *   # 标准模式（默认）
- *   cd src && node --require tsx/cjs node/scheduler/etherpad_changes/PadContentRebuildAPI.js room-229
- *   cd src && node --require tsx/cjs node/scheduler/etherpad_changes/PadContentRebuildAPI.js room-229 0 10
+ *   # 启动 HTTP 服务器（默认端口 3000）
+ *   cd src && node --require tsx/cjs node/scheduler/etherpad_changes/PadContentRebuildAPI.js
+ *   
+ *   # 指定端口
+ *   cd src && node --require tsx/cjs node/scheduler/etherpad_changes/PadContentRebuildAPI.js --port 8080
  * 
- *   # Base64 编码模式（推荐用于大数据量和远程调用）
- *   cd src && node --require tsx/cjs node/scheduler/etherpad_changes/PadContentRebuildAPI.js room-229 0 10 --base64
+ *   # 通过 HTTP 请求获取数据
+ *   curl "http://localhost:3000/rebuild?padId=room-229&startRev=0&endRev=10&useBase64=true"
  */
 
 'use strict';
@@ -26,43 +32,20 @@ process.on('unhandledRejection', (err) => { throw err; });
 // 设置环境变量以最小化日志输出
 process.env.SUPPRESS_LOGS = 'true';
 
-// 禁用所有 console 输出到 stdout，确保只输出 JSON
-const originalStdoutWrite = process.stdout.write;
-const originalConsoleLog = console.log;
-const bufferedLogs = [];
-
-// 拦截所有 stdout 输出
-process.stdout.write = function(chunk, encoding, callback) {
-  bufferedLogs.push(chunk);
-  return true;
-};
-
+const http = require('http');
+const url = require('url');
 const db = require('ep_etherpad-lite/node/db/DB');
 const padManager = require('ep_etherpad-lite/node/db/PadManager');
 const Changeset = require('ep_etherpad-lite/static/js/Changeset');
-
-// 恢复 stdout 用于最后输出 JSON
-process.stdout.write = originalStdoutWrite;
-console.log = originalConsoleLog;
+const AttributePool = require('ep_etherpad-lite/static/js/AttributePool').default;
 
 // 解析命令行参数
 const args = process.argv.slice(2);
-if (args.length < 1) {
-  console.error(JSON.stringify({
-    error: '缺少 padId 参数',
-    usage: 'node PadContentRebuildAPI.js <padId> [startRev] [endRev] [--base64]',
-    example: 'node PadContentRebuildAPI.js room-229 0 10 --base64'
-  }));
-  process.exit(1);
-}
+const portIndex = args.findIndex(arg => arg === '--port' || arg === '-p');
+const httpPort = portIndex >= 0 && args[portIndex + 1] ? parseInt(args[portIndex + 1]) : 3000;
 
-// 检查是否使用 Base64 编码模式
-const useBase64 = args.includes('--base64');
-const filteredArgs = args.filter(arg => arg !== '--base64');
-
-const padId = filteredArgs[0];
-const startRev = filteredArgs[1] ? parseInt(filteredArgs[1]) : null;
-const endRev = filteredArgs[2] ? parseInt(filteredArgs[2]) : null;
+// 启动 HTTP 服务器
+startHttpServer(httpPort);
 
 /**
  * 格式化时间戳为香港时间
@@ -76,22 +59,6 @@ function formatHKTime(timestamp) {
     `${pad(hkDate.getUTCHours())}:${pad(hkDate.getUTCMinutes())}:${pad(hkDate.getUTCSeconds())}.${padMs(hkDate.getUTCMilliseconds())}`;
 }
 
-/**
- * 安全的 JSON 字符串化 - 确保所有字符都被正确转义
- * 移除可能导致 JSON 解析失败的控制字符
- */
-function safeStringify(obj) {
-  return JSON.stringify(obj, (key, value) => {
-    // 如果是字符串类型，确保特殊字符被正确处理
-    if (typeof value === 'string') {
-      // 移除或替换可能导致问题的控制字符
-      return value
-        .replace(/[\u0000-\u0008\u000B-\u000C\u000E-\u001F\u007F-\u009F]/g, '') // 移除控制字符
-        .replace(/\uFEFF/g, ''); // 移除 BOM (Byte Order Mark)
-    }
-    return value;
-  });
-}
 
 /**
  * Base64 编码内容 - 用于避免 JSON 转义问题
@@ -107,9 +74,93 @@ function encodeToBase64(content) {
 }
 
 /**
- * 重建 Pad 版本内容
+ * 启动 HTTP 服务器
  */
-async function rebuildPadContent() {
+function startHttpServer(port) {
+  const server = http.createServer(async (req, res) => {
+    // 只处理 GET 请求
+    if (req.method !== 'GET') {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Method not allowed. Use GET.' }));
+      return;
+    }
+
+    const parsedUrl = url.parse(req.url, true);
+    
+    // 健康检查端点
+    if (parsedUrl.pathname === '/health' || parsedUrl.pathname === '/') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ 
+        status: 'ok', 
+        service: 'PadContentRebuildAPI',
+        mode: 'http-stream'
+      }));
+      return;
+    }
+
+    // 重建端点
+    if (parsedUrl.pathname === '/rebuild') {
+      const query = parsedUrl.query;
+      const padId = query.padId;
+      const startRev = query.startRev ? parseInt(query.startRev) : null;
+      const endRev = query.endRev ? parseInt(query.endRev) : null;
+      const useBase64 = query.useBase64 === 'true' || query.useBase64 === '1';
+
+      if (!padId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Missing padId parameter' }));
+        return;
+      }
+
+      try {
+        // 设置响应头，支持流式传输
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Transfer-Encoding': 'chunked',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-cache'
+        });
+
+        // 开始流式传输 JSON
+        await streamRebuildPadContent(res, padId, startRev, endRev, useBase64);
+        
+        res.end();
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: false,
+          error: error.message,
+          stack: error.stack
+        }));
+      }
+      return;
+    }
+
+    // 404
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
+  });
+
+  server.listen(port, () => {
+    console.error(`🚀 HTTP Stream Server started on port ${port}`);
+    console.error(`📡 Health check: http://localhost:${port}/health`);
+    console.error(`📡 Rebuild API: http://localhost:${port}/rebuild?padId=<padId>&startRev=<start>&endRev=<end>&useBase64=<true|false>`);
+    console.error(`\n💡 Example: http://localhost:${port}/rebuild?padId=room-229&startRev=0&endRev=10&useBase64=true`);
+  });
+
+  // 优雅关闭
+  process.on('SIGTERM', () => {
+    console.error('\n🛑 Shutting down server...');
+    server.close(() => {
+      process.exit(0);
+    });
+  });
+}
+
+/**
+ * 流式重建 Pad 版本内容（通过 HTTP 流传输）
+ */
+async function streamRebuildPadContent(res, padId, startRev, endRev, useBase64) {
   try {
     // 初始化数据库
     await db.init();
@@ -117,10 +168,11 @@ async function rebuildPadContent() {
     // 检查 pad 是否存在
     const exists = await padManager.doesPadExists(padId);
     if (!exists) {
-      return {
+      res.write(JSON.stringify({
         success: false,
         error: `Pad [${padId}] does not exist`
-      };
+      }));
+      return;
     }
 
     // 获取 Pad 对象
@@ -132,11 +184,25 @@ async function rebuildPadContent() {
     const actualEndRev = endRev !== null ? Math.min(headRevision, endRev) : headRevision;
 
     if (actualStartRev > actualEndRev) {
-      return {
+      res.write(JSON.stringify({
         success: false,
         error: `Invalid revision range: ${actualStartRev} > ${actualEndRev}`
-      };
+      }));
+      return;
     }
+
+    // 发送响应头部信息
+    res.write(JSON.stringify({
+      success: true,
+      pad_id: padId,
+      head_revision: headRevision,
+      requested_range: {
+        start: actualStartRev,
+        end: actualEndRev
+      },
+      encoding: useBase64 ? 'base64' : 'standard',
+      stream: true
+    }) + '\n');
 
     // 获取 Changeset 核心函数
     const { makeAText, applyToAText } = Changeset;
@@ -150,34 +216,50 @@ async function rebuildPadContent() {
         const revData = await db.get(`pad:${padId}:revs:${rev}`);
         if (revData) {
           const { changeset, meta } = revData;
-          const pool = meta.pool || pad.apool();
+          
+          // 将数据库中的 pool 对象转换为 AttributePool 实例
+          let pool;
+          if (meta.pool && typeof meta.pool === 'object') {
+            pool = new AttributePool();
+            pool.fromJsonable(meta.pool);
+          } else {
+            pool = pad.apool();
+          }
+          
           atext = applyToAText(changeset, atext, pool);
         }
       }
     }
 
-    const results = [];
     let successCount = 0;
     let errorCount = 0;
 
-    // 逐个版本应用 Changeset
+    // 逐个版本应用 Changeset 并流式发送
     for (let rev = actualStartRev; rev <= actualEndRev; rev++) {
       try {
         const revData = await db.get(`pad:${padId}:revs:${rev}`);
 
         if (!revData) {
           errorCount++;
-          results.push({
+          res.write(JSON.stringify({
             revision: rev,
             success: false,
             error: 'Revision data not found'
-          });
+          }) + '\n');
           continue;
         }
 
         const { changeset, meta } = revData;
         const { author, timestamp, pool: metaPool } = meta;
-        const pool = metaPool || pad.apool();
+        
+        // 将数据库中的 pool 对象转换为 AttributePool 实例
+        let pool;
+        if (metaPool && typeof metaPool === 'object') {
+          pool = new AttributePool();
+          pool.fromJsonable(metaPool);
+        } else {
+          pool = pad.apool();
+        }
 
         // 应用 changeset
         const oldText = atext.text;
@@ -210,75 +292,43 @@ async function rebuildPadContent() {
           record.changeset_base64 = encodeToBase64(changeset);
           record.attribs_base64 = encodeToBase64(atext.attribs || '');
         } else {
-          // 标准模式 - 直接存储（会被 safeStringify 过滤控制字符）
+          // 标准模式 - 直接存储
           record.content = content;
           record.changeset = changeset;
           record.attribs = atext.attribs || '';
         }
 
-        results.push(record);
+        // 流式发送每个版本（NDJSON 格式，每行一个 JSON 对象）
+        res.write(JSON.stringify(record) + '\n');
         successCount++;
 
       } catch (err) {
         errorCount++;
-        results.push({
+        res.write(JSON.stringify({
           revision: rev,
           success: false,
           error: err.message
-        });
+        }) + '\n');
       }
     }
 
-    // 返回完整结果
-    const result = {
-      success: true,
-      pad_id: padId,
-      head_revision: headRevision,
-      requested_range: {
-        start: actualStartRev,
-        end: actualEndRev
-      },
-      statistics: {
+    // 发送统计信息和结束标记
+    res.write(JSON.stringify({
+      _statistics: {
         total: actualEndRev - actualStartRev + 1,
         success: successCount,
         failed: errorCount
       },
-      versions: results
-    };
-
-    // 如果使用 Base64 模式，添加标记
-    if (useBase64) {
-      result.encoding = 'base64';
-      result.note = '内容使用 Base64 编码，需要解码后使用';
-    }
-
-    return result;
+      _end: true
+    }) + '\n');
 
   } catch (error) {
-    return {
+    res.write(JSON.stringify({
       success: false,
       error: error.message,
       stack: error.stack
-    };
+    }) + '\n');
   }
 }
 
-// 执行并输出 JSON
-(async () => {
-  try {
-    const result = await rebuildPadContent();
-    // 使用安全的 JSON 字符串化方法，不使用格式化以减少输出大小
-    const jsonOutput = safeStringify(result);
-    console.log(jsonOutput);
-    process.exit(result.success ? 0 : 1);
-  } catch (error) {
-    // 如果发生意外错误，输出错误信息
-    console.log(safeStringify({
-      success: false,
-      error: error.message,
-      stack: error.stack
-    }));
-    process.exit(1);
-  }
-})();
 
