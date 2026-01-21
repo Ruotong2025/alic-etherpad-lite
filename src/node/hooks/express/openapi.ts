@@ -482,25 +482,9 @@ const generateDefinitionForVersion = (version:string, style = APIPathStyle.FLAT)
       responses: {
         ...defaultResponses,
       },
-      securitySchemes: {
-        openid: {
-          type: "oauth2",
-          flows: {
-            authorizationCode: {
-              authorizationUrl: settings.sso.issuer+"/oidc/auth",
-              tokenUrl: settings.sso.issuer+"/oidc/token",
-              scopes: {
-                openid: "openid",
-                profile: "profile",
-                email: "email",
-                admin: "admin"
-              }
-            }
-          },
-        },
-      },
+      securitySchemes: {},
     },
-    security: [{openid: []}],
+
   };
 
   // build operations

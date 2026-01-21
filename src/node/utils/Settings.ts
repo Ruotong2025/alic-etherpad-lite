@@ -112,7 +112,7 @@ exports.updateServer = "https://static.etherpad.org"
 /**
  * Enable or disable automatic update checking
  */
-exports.updateCheck = true;
+exports.updateCheck = false;
 
 /*
  * Skin name.
