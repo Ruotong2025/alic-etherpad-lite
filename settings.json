@@ -1,0 +1,120 @@
+{
+  "title": "Etherpad",
+  "favicon": null,
+  "skinName": "colibris",
+  "skinVariants": "super-light-toolbar super-light-editor light-background",
+  "ip": "0.0.0.0",
+  "port": 9002,
+  "showSettingsInAdminPage": true,
+  "dbType": "mysql",
+  "dbSettings": {
+    "user": "root",
+    "host": "112.74.92.135",
+    "port": 3306,
+    "password": "1q2w3e4R",
+    "database": "alic",
+    "charset": "utf8mb4"
+  },
+  "defaultPadText": "Welcome to Etherpad!\n\nThis pad text is synchronized as you type, so that everyone viewing this page sees the same text. This allows you to collaborate seamlessly on documents!\n\nGet involved with Etherpad at https://etherpad.org\n",
+  "padOptions": {
+    "noColors": false,
+    "showControls": true,
+    "showChat": true,
+    "showLineNumbers": true,
+    "useMonospaceFont": false,
+    "userName": null,
+    "userColor": null,
+    "rtl": false,
+    "alwaysShowChat": false,
+    "chatAndUsers": false,
+    "lang": null
+  },
+  "padShortcutEnabled": {
+    "altF9": true,
+    "altC": true,
+    "cmdShift2": true,
+    "delete": true,
+    "return": true,
+    "esc": true,
+    "cmdS": true,
+    "tab": true,
+    "cmdZ": true,
+    "cmdY": true,
+    "cmdI": true,
+    "cmdB": true,
+    "cmdU": true,
+    "cmd5": true,
+    "cmdShiftL": true,
+    "cmdShiftN": true,
+    "cmdShift1": true,
+    "cmdShiftC": true,
+    "cmdH": true,
+    "ctrlHome": true,
+    "pageUp": true,
+    "pageDown": true
+  },
+  "suppressErrorsInPadText": false,
+  "requireSession": false,
+  "editOnly": false,
+  "minify": true,
+  "maxAge": 21600,
+  "abiword": null,
+  "soffice": null,
+  "tidyHtml": null,
+  "allowUnknownFileEnds": true,
+  "requireAuthentication": false,
+  "requireAuthorization": false,
+  "trustProxy": true,
+  "cookie": {
+    "sameSite": "Lax"
+  },
+  "disableIPlogging": false,
+  "automaticReconnectionTimeout": 0,
+  "scrollWhenFocusLineIsOutOfViewport": {
+    "percentage": {
+      "editionAboveViewport": 0,
+      "editionBelowViewport": 0
+    },
+    "duration": 0,
+    "scrollWhenCaretIsInTheLastLineOfViewport": false,
+    "percentageToScrollWhenUserPressesArrowUp": 0
+  },
+  "users": {},
+  "socketTransportProtocols": ["websocket", "polling"],
+  "socketIo": {
+    "maxHttpBufferSize": 10000
+  },
+  "loadTest": false,
+  "dumpOnUncleanExit": false,
+  "indentationOnNewLine": false,
+  "importExportRateLimiting": {
+    "windowMs": 90000,
+    "max": 10,
+    "validate": {
+      "trustProxy": false
+    }
+  },
+  "importMaxFileSize": 52428800,
+  "commitRateLimiting": {
+    "duration": 1,
+    "points": 10
+  },
+  "exposeVersion": false,
+  "updateCheck": false,
+  "loglevel": "INFO",
+  "logconfig": {
+    "appenders": {
+      "console": {
+        "type": "console"
+      }
+    },
+    "categories": {
+      "default": {
+        "appenders": ["console"],
+        "level": "info"
+      }
+    }
+  },
+  "customLocaleStrings": {},
+  "enableAdminUITests": false
+}
