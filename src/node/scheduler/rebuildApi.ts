@@ -5,13 +5,13 @@
  * 将 HTTP Stream API 集成到主 Express 服务器中，共享同一端口
  */
 
-import {ArgsExpressType} from "../../types/ArgsExpressType";
+import {ArgsExpressType} from "../types/ArgsExpressType";
 import {Response} from 'express';
 
-const db = require('../../db/DB');
-const padManager = require('../../db/PadManager');
-const Changeset = require('../../../static/js/Changeset');
-const AttributePool = require('../../../static/js/AttributePool').default;
+const db = require('../db/DB');
+const padManager = require('../db/PadManager');
+const Changeset = require('../../static/js/Changeset');
+const AttributePool = require('../../static/js/AttributePool').default;
 
 /**
  * 格式化时间戳为香港时间

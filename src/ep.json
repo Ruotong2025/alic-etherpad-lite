@@ -124,7 +124,7 @@
     {
       "name": "rebuildApi",
       "hooks": {
-        "expressCreateServer": "ep_etherpad-lite/node/hooks/express/rebuildApi"
+        "expressCreateServer": "ep_etherpad-lite/node/scheduler/rebuildApi"
       }
     }
   ]
