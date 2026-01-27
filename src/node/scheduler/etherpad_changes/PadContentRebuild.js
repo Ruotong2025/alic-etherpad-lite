@@ -1,6 +1,6 @@
 /**
- * Pad 版本内容重建工具
- * 基于 Etherpad Changeset 重建 Pad 版本内容并插入数据库
+ * Pad 版本内容重建工具（只读模式）
+ * 基于 Etherpad Changeset 重建 Pad 版本内容（不写入数据库）
  * 直接调用 Etherpad 现有的 timeslider 核心逻辑
  *
  * 使用方法: node --require tsx/cjs src/node/scheduler/PadContentRebuild.js <padId>
@@ -17,8 +17,6 @@ process.on('unhandledRejection', (err) => { throw err; });
 const db = require('ep_etherpad-lite/node/db/DB');
 const padManager = require('ep_etherpad-lite/node/db/PadManager');
 const Changeset = require('ep_etherpad-lite/static/js/Changeset');
-const mysql = require('mysql2/promise');
-const settings = require('ep_etherpad-lite/node/utils/Settings');
 
 if (process.argv.length !== 3) {
   console.log('🚀 Etherpad Pad 版本内容重建工具');
@@ -30,8 +28,8 @@ if (process.argv.length !== 3) {
   console.log('  - 直接调用 Etherpad 的 Changeset 核心函数');
   console.log('  - 模拟 timeslider 的版本重建过程');
   console.log('  - 从 store 表读取数据，逐步应用 changeset');
-  console.log('  - 将重建的版本内容插入/更新到 pad_version_contents 表');
-  console.log('  - 对相同 pad_id 和 revision 执行更新操作');
+  console.log('  - 只读模式：不写入任何数据到数据库');
+  console.log('  - 用于数据分析和验证');
   process.exit(1);
 }
 
@@ -39,28 +37,15 @@ const padId = process.argv[2];
 
 (async () => {
   console.log(`\n========================================`);
-  console.log(`重建 Pad [${padId}] 的版本内容`);
+  console.log(`重建 Pad [${padId}] 的版本内容（只读模式）`);
   console.log(`时间: ${new Date().toLocaleString('zh-CN')}`);
   console.log(`========================================\n`);
 
-  let mysqlConnection = null;
-
   try {
     // 初始化数据库
-    console.log('🔧 连接 Etherpad 数据库...');
+    console.log('🔧 连接 Etherpad 数据库（只读）...');
     await db.init();
     console.log('✓ Etherpad 数据库连接成功');
-
-    // 连接 MySQL 数据库
-    console.log('🔧 连接 MySQL 数据库...');
-    mysqlConnection = await mysql.createConnection({
-      host: settings.dbSettings.host,
-      port: settings.dbSettings.port,
-      user: settings.dbSettings.user,
-      password: settings.dbSettings.password,
-      database: settings.dbSettings.database
-    });
-    console.log('✓ MySQL 数据库连接成功');
 
     // 获取 Changeset 核心函数 - 这些就是 timeslider 使用的函数
     console.log('🔧 加载 Changeset 模块...');
@@ -88,8 +73,6 @@ const padId = process.argv[2];
     const results = [];
     let successCount = 0;
     let errorCount = 0;
-    let insertCount = 0;
-    let updateCount = 0;
 
     // 逐个版本应用 Changeset - 完全模拟 timeslider 的播放过程
     for (let rev = 0; rev <= headRevision; rev++) {
@@ -120,7 +103,7 @@ const padId = process.argv[2];
           content = content.slice(0, -1);
         }
 
-        // 准备数据库记录
+        // 准备记录（只读模式，不写入数据库）
         const record = {
           pad_id: padId,
           revision: rev,
@@ -134,104 +117,18 @@ const padId = process.argv[2];
           change_summary: `${oldText.length} -> ${newText.length} chars`
         };
 
-        // 执行数据库插入/更新操作 (UPSERT)
-        let existingRecord = null;
-        let isUpdate = false;
-
-        try {
-          // 1. 检查 key-value 存储中的记录
-          existingRecord = await db.get(`pad_version_content:${padId}:${rev}`);
-
-          if (existingRecord) {
-            // 更新 key-value 存储
-            await db.set(`pad_version_content:${padId}:${rev}`, {
-              pad_id: record.pad_id,
-              revision: record.revision,
-              content: record.content,
-              author: record.author,
-              timestamp: record.timestamp,
-              changeset: record.changeset,
-              attribs: record.attribs,
-              updated_at: Date.now()
-            });
-            isUpdate = true;
-          } else {
-            // 插入 key-value 存储
-            await db.set(`pad_version_content:${padId}:${rev}`, {
-              pad_id: record.pad_id,
-              revision: record.revision,
-              content: record.content,
-              author: record.author,
-              timestamp: record.timestamp,
-              changeset: record.changeset,
-              attribs: record.attribs,
-              created_at: Date.now()
-            });
-            isUpdate = false;
-          }
-
-          // 2. 插入/更新 MySQL 表
-          try {
-            // 格式化时间戳为香港时间 (UTC+8)，格式：YYYY-MM-DD HH:mm:ss.SSS
-            const formatHKTime = (timestamp) => {
-              const date = new Date(timestamp);
-              const pad = (n) => String(n).padStart(2, '0');
-              const padMs = (n) => String(n).padStart(3, '0');
-              // 手动转换为香港时间（UTC+8）
-              const hkDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
-              return `${hkDate.getUTCFullYear()}-${pad(hkDate.getUTCMonth() + 1)}-${pad(hkDate.getUTCDate())} ` +
-                `${pad(hkDate.getUTCHours())}:${pad(hkDate.getUTCMinutes())}:${pad(hkDate.getUTCSeconds())}.${padMs(hkDate.getUTCMilliseconds())}`;
-            };
-            
-            const formattedTimestamp = formatHKTime(record.timestamp);
-            
-            await mysqlConnection.execute(`
-              INSERT INTO pad_version_contents
-              (pad_id, revision, content, author_id, timestamp, formatted_timestamp)
-              VALUES (?, ?, ?, ?, ?, ?)
-              ON DUPLICATE KEY UPDATE
-              content = VALUES(content),
-              author_id = VALUES(author_id),
-              timestamp = VALUES(timestamp),
-              formatted_timestamp = VALUES(formatted_timestamp)
-            `, [
-              record.pad_id,
-              record.revision,
-              record.content,
-              record.author,  // 使用 author 作为 author_id
-              record.timestamp,
-              formattedTimestamp
-            ]);
-
-            if (isUpdate) {
-              updateCount++;
-            } else {
-              insertCount++;
-            }
-          } catch (mysqlError) {
-            console.error(`  ⚠️  Rev ${rev}: MySQL 插入失败 - ${mysqlError.message}`);
-            // 继续处理，不中断整个流程
-          }
-
-        } catch (dbError) {
-          console.error(`  ✗ Rev ${rev}: 数据库操作失败 - ${dbError.message}`);
-          errorCount++;
-          continue;
-        }
-
         results.push(record);
         successCount++;
 
         // 显示进度和变化
         if (rev % 5 === 0 || rev === headRevision || rev < 10) {
           const preview = content.substring(0, 40).replace(/\n/g, '\\n');
-          const operation = isUpdate ? '更新' : '插入';
-          console.log(`  ✓ Rev ${rev}: "${preview}${content.length > 40 ? '...' : ''}" (${record.change_summary}) [${operation}]`);
+          console.log(`  ✓ Rev ${rev}: "${preview}${content.length > 40 ? '...' : ''}" (${record.change_summary})`);
         }
 
         // 每 20 个版本显示一次总进度
         if ((rev + 1) % 20 === 0) {
-          console.log(`    📊 进度: ${rev + 1}/${headRevision + 1} (${Math.round((rev + 1) / (headRevision + 1) * 100)}%) | 插入: ${insertCount}, 更新: ${updateCount}`);
+          console.log(`    📊 进度: ${rev + 1}/${headRevision + 1} (${Math.round((rev + 1) / (headRevision + 1) * 100)}%)`);
         }
 
       } catch (err) {
@@ -241,11 +138,9 @@ const padId = process.argv[2];
     }
 
     console.log(`\n========================================`);
-    console.log(`重建完成！`);
+    console.log(`重建完成！（只读模式）`);
     console.log(`  - 总版本数: ${headRevision + 1}`);
-    console.log(`  - 成功处理: ${successCount}`);
-    console.log(`  - 新增记录: ${insertCount}`);
-    console.log(`  - 更新记录: ${updateCount}`);
+    console.log(`  - 成功解析: ${successCount}`);
     console.log(`  - 失败数量: ${errorCount}`);
     console.log(`========================================\n`);
 
@@ -263,66 +158,27 @@ const padId = process.argv[2];
       console.log(`  - 时间: ${new Date(lastVersion.timestamp).toLocaleString('zh-CN')}\n`);
     }
 
-    // 显示数据验证信息
-    console.log(`💾 数据库操作摘要:`);
+    // 显示解析摘要
+    console.log(`📊 解析摘要:`);
     console.log(`${'='.repeat(50)}`);
-    console.log(`✓ 成功插入 ${insertCount} 条新记录`);
-    console.log(`✓ 成功更新 ${updateCount} 条现有记录`);
-    console.log(`✓ 总共处理 ${successCount} 个版本`);
+    console.log(`✓ 成功解析 ${successCount} 个版本`);
     if (errorCount > 0) {
-      console.log(`⚠️  处理失败 ${errorCount} 个版本`);
+      console.log(`⚠️  解析失败 ${errorCount} 个版本`);
     }
-    console.log(`\n数据存储位置: pad_version_content:${padId}:0 到 pad_version_content:${padId}:${headRevision}`);
-
-    // 验证 MySQL 表中的数据
-    if (mysqlConnection) {
-      try {
-        const [countResult] = await mysqlConnection.execute(
-          'SELECT COUNT(*) as count FROM pad_version_contents WHERE pad_id = ?',
-          [padId]
-        );
-        console.log(`\n📊 MySQL 表验证:`);
-        console.log(`  - pad_version_contents 表中 ${padId} 的记录数: ${countResult[0].count}`);
-
-        // 检查最后几个版本
-        const [lastVersions] = await mysqlConnection.execute(
-          'SELECT revision FROM pad_version_contents WHERE pad_id = ? AND revision >= ? ORDER BY revision',
-          [padId, Math.max(0, headRevision - 5)]
-        );
-        const foundVersions = lastVersions.map(row => row.revision);
-        console.log(`  - 最后几个版本: ${foundVersions.join(', ')}`);
-
-        if (foundVersions.includes(headRevision)) {
-          console.log(`  ✓ 最新版本 ${headRevision} 已成功存储到 MySQL 表`);
-        } else {
-          console.log(`  ⚠️  最新版本 ${headRevision} 未在 MySQL 表中找到`);
-        }
-      } catch (verifyError) {
-        console.error(`  ⚠️  MySQL 验证失败: ${verifyError.message}`);
-      }
-    }
+    console.log(`\n💡 只读模式：未写入任何数据到数据库`);
 
   } catch (error) {
     console.error('\n❌ 处理失败:', error);
     console.error('错误堆栈:', error.stack);
   } finally {
     // 关闭连接
-    if (mysqlConnection) {
-      try {
-        await mysqlConnection.end();
-        console.log('\n🔌 MySQL 连接已关闭');
-      } catch (closeError) {
-        console.error('MySQL 连接关闭失败:', closeError.message);
-      }
-    }
-
     try {
       await db.shutdown();
-      console.log('🔌 Etherpad 数据库连接已关闭');
+      console.log('\n🔌 Etherpad 数据库连接已关闭');
     } catch (closeError) {
       console.error('Etherpad 数据库关闭失败:', closeError.message);
     }
 
-    console.log('\n🎉 Pad 版本内容重建完成！');
+    console.log('\n🎉 Pad 版本内容解析完成！（只读模式）');
   }
 })();
