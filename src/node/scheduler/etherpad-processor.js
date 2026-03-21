@@ -315,7 +315,27 @@ class EtherpadProcessor {
    */
   async detectChangedPads(targetDate = null) {
     console.log('🔍 开始检测前一天有变更的 pads...');
-    
+
+    // ========== 时区验证日志 ==========
+    const now = new Date();
+    const timezoneOffset = now.getTimezoneOffset(); // 分钟
+    const serverTime = now.toISOString(); // 强制转为 UTC ISO 格式
+
+    console.log('\n========== 时区验证 ==========');
+    console.log(`🖥️  服务器时间 (ISO格式): ${serverTime}`);
+    console.log(`🖥️  服务器时区偏移: ${timezoneOffset} 分钟 (${timezoneOffset === 0 ? 'UTC' : '非UTC'})`);
+    console.log(`🖥️  服务器本地时间: ${now.toString()}`);
+
+    const beijingOffsetMs = 8 * 60 * 60 * 1000;
+    // UTC = 本地时间 + timezoneOffset(分钟) 转毫秒
+    const utcTime = new Date(now.getTime() + (timezoneOffset * 60 * 1000));
+    // 北京时间 = UTC + 8小时
+    const beijingTime = new Date(utcTime.getTime() + beijingOffsetMs);
+    console.log(`🕐 计算的 UTC 时间: ${utcTime.toISOString()}`);
+    console.log(`🕐 计算的北京时间: ${beijingTime.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+    console.log('================================\n');
+    // ========== 时区验证日志结束 ==========
+
     try {
       // 计算目标日期 (默认为昨天，使用北京时间)
       let date;
@@ -323,15 +343,8 @@ class EtherpadProcessor {
         date = new Date(targetDate);
       } else {
         // 使用北京时间计算昨天
-        // 步骤1: 获取当前北京时间
-        const nowBeijing = new Date();
-        // 转换为北京时间 (UTC+8)
-        const beijingOffset = 8 * 60 * 60 * 1000; // 8小时
-        const nowUTC = nowBeijing.getTime() + (nowBeijing.getTimezoneOffset() * 60 * 1000);
-        const nowBeijingTime = new Date(nowUTC + beijingOffset);
-        
-        // 步骤2: 在北京时间上减去1天得到昨天
-        date = new Date(nowBeijingTime);
+        // 直接使用上面计算出的北京时间
+        date = new Date(beijingTime);
         date.setDate(date.getDate() - 1);
       }
       
