@@ -311,32 +311,53 @@ class EtherpadProcessor {
 
   /**
    * 检测前一天有变更的 pads (通过检测前一天的时间戳)
+   * 使用北京时间计算日期，确保与 cron 配置的时区一致
    */
   async detectChangedPads(targetDate = null) {
     console.log('🔍 开始检测前一天有变更的 pads...');
     
     try {
-      // 计算目标日期 (默认为昨天)
+      // 计算目标日期 (默认为昨天，使用北京时间)
       let date;
       if (targetDate) {
         date = new Date(targetDate);
       } else {
-        // 默认为昨天
-        date = new Date();
+        // 使用北京时间计算昨天
+        // 步骤1: 获取当前北京时间
+        const nowBeijing = new Date();
+        // 转换为北京时间 (UTC+8)
+        const beijingOffset = 8 * 60 * 60 * 1000; // 8小时
+        const nowUTC = nowBeijing.getTime() + (nowBeijing.getTimezoneOffset() * 60 * 1000);
+        const nowBeijingTime = new Date(nowUTC + beijingOffset);
+        
+        // 步骤2: 在北京时间上减去1天得到昨天
+        date = new Date(nowBeijingTime);
         date.setDate(date.getDate() - 1);
       }
       
-      // 计算目标日期的时间范围
-      const startOfDay = new Date(date);
-      startOfDay.setHours(0, 0, 0, 0);
-      const endOfDay = new Date(date);
-      endOfDay.setHours(23, 59, 59, 999);
+      // 计算目标日期的时间范围（使用北京时间）
+      // 先转换为北京时间当天 00:00:00
+      const beijingOffset = 8 * 60 * 60 * 1000; // 8小时
       
-      const startTimestamp = startOfDay.getTime();
-      const endTimestamp = endOfDay.getTime();
+      // 北京时间当天的开始 (00:00:00 北京时间)
+      const startOfDayUTC = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+      // 转换为 UTC 时间戳 (减去8小时)
+      const startTimestamp = startOfDayUTC.getTime() - beijingOffset;
       
-      console.log(`📅 检测日期: ${date.toLocaleDateString('zh-CN')} (前一天)`);
-      console.log(`📅 时间范围: ${startOfDay.toLocaleString('zh-CN')} ~ ${endOfDay.toLocaleString('zh-CN')}`);
+      // 北京时间当天的结束 (23:59:59.999 北京时间)
+      const endOfDayUTC = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+      // 转换为 UTC 时间戳 (减去8小时)
+      const endTimestamp = endOfDayUTC.getTime() - beijingOffset;
+      
+      // 格式化显示北京时间范围
+      const startBeijing = new Date(startTimestamp + beijingOffset);
+      const endBeijing = new Date(endTimestamp + beijingOffset);
+      const padDateStr = `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`;
+      
+      console.log(`📅 检测日期(北京时间): ${padDateStr} (前一天)`);
+      console.log(`📅 北京时间范围: ${padDateStr} 00:00:00 ~ 23:59:59`);
+      console.log(`📅 北京时间 00:00:00 = UTC 时间戳: ${startTimestamp}`);
+      console.log(`📅 北京时间 23:59:59 = UTC 时间戳: ${endTimestamp}`);
       console.log(`📅 时间戳范围: ${startTimestamp} ~ ${endTimestamp}`);
       
       // 从 store 表中查询当天有变更的 pads
@@ -356,7 +377,7 @@ class EtherpadProcessor {
       
       const changedPads = pads.map(row => ({
         padId: row.pad_id,
-        detectionDate: date.toLocaleDateString('zh-CN')
+        detectionDate: padDateStr
       }));
       
       if (changedPads.length > 0) {
@@ -428,7 +449,42 @@ class EtherpadProcessor {
   }
 
   /**
-   * 运行 pad changes 处理任务
+   * 获取所有 pads (全量)
+   */
+  async getAllPads() {
+    console.log('🔍 开始获取所有 pads...');
+    
+    try {
+      // 从 store 表中查询所有 pads
+      const query = `
+        SELECT DISTINCT
+          SUBSTRING_INDEX(SUBSTRING_INDEX(\`key\`, ':', 2), ':', -1) as pad_id
+        FROM store
+        WHERE \`key\` LIKE 'pad:%:revs:%'
+        ORDER BY pad_id
+      `;
+      
+      const [pads] = await this.db.connection.execute(query);
+      console.log(`📊 找到 ${pads.length} 个 pads`);
+      
+      const allPads = pads.map(row => ({
+        padId: row.pad_id
+      }));
+      
+      if (allPads.length > 0) {
+        console.log('\n📝 需要处理的 Pads 总数:', allPads.length);
+      }
+      
+      return allPads;
+      
+    } catch (error) {
+      console.error('❌ 获取所有 pads 失败:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * 运行 pad changes 处理任务（增量 - 仅处理前一天有变更的）
    */
   async runPadChangesTask() {
     const taskId = generateTaskId();
@@ -502,6 +558,83 @@ class EtherpadProcessor {
       await this.disconnect();
     }
   }
+
+  /**
+   * 运行 pad changes 全量处理任务（处理所有 pads）
+   */
+  async runPadChangesFullTask() {
+    const taskId = generateTaskId();
+    console.log(`🚀 开始执行 Pad Changes 全量处理任务 ${taskId}`);
+    console.log(`⏰ 开始时间: ${formatTime(new Date())}`);
+    console.log(`⚠️  警告: 这将重新处理所有 pads 的 changes 数据！`);
+    
+    try {
+      await this.connect();
+      
+      // 1. 获取所有 pads
+      const allPads = await this.getAllPads();
+      
+      if (allPads.length === 0) {
+        console.log('✅ 没有需要处理的 pads');
+        return {
+          success: true,
+          taskId,
+          total: 0,
+          processed: 0,
+          failed: 0
+        };
+      }
+      
+      // 2. 逐个处理所有 pads
+      let processedCount = 0;
+      let failedCount = 0;
+      const failedPads = [];
+      
+      for (const pad of allPads) {
+        try {
+          await this.processPadChanges(pad.padId);
+          processedCount++;
+        } catch (error) {
+          console.error(`❌ 处理 ${pad.padId} 失败:`, error.message);
+          failedCount++;
+          failedPads.push({
+            padId: pad.padId,
+            error: error.message
+          });
+        }
+        
+        // 显示进度
+        console.log(`\n📈 进度: ${processedCount + failedCount}/${allPads.length}`);
+      }
+      
+      console.log('\n📊 Pad Changes 全量处理完成统计:');
+      console.log(`   总数: ${allPads.length}`);
+      console.log(`   成功: ${processedCount}`);
+      console.log(`   失败: ${failedCount}`);
+      
+      if (failedPads.length > 0) {
+        console.log('\n失败的 Pads:');
+        failedPads.forEach(p => console.log(`  - ${p.padId}: ${p.error}`));
+      }
+      
+      console.log(`⏰ 结束时间: ${formatTime(new Date())}`);
+      
+      return {
+        success: true,
+        taskId,
+        total: allPads.length,
+        processed: processedCount,
+        failed: failedCount,
+        failedPads
+      };
+      
+    } catch (error) {
+      console.error('❌ Pad Changes 全量处理任务失败:', error);
+      return { success: false, error: error.message, taskId };
+    } finally {
+      await this.disconnect();
+    }
+  }
 }
 
 // 命令行入口
@@ -548,6 +681,20 @@ async function main() {
       process.exit(1);
     }
 
+  } else if (args.includes('--process-pad_changes-full')) {
+    // 处理 pad_version_changes (全量重跑)
+    console.log(`🔄 [${new Date().toISOString()}] 开始执行 Pad Changes 全量处理任务`);
+    console.log(`⚠️  警告: 这将重新处理所有 pads 的 changes 数据！`);
+    const result = await processor.runPadChangesFullTask();
+    
+    if (result.success) {
+      console.log(`✅ [${new Date().toISOString()}] Pad Changes 全量处理完成`);
+      console.log(`📊 处理统计: 总数${result.total}, 成功${result.processed}, 失败${result.failed}`);
+    } else {
+      console.log(`❌ [${new Date().toISOString()}] Pad Changes 全量处理失败: ${result.error}`);
+      process.exit(1);
+    }
+
   } else {
     // 显示帮助信息
     console.log('🚀 Etherpad数据处理器');
@@ -556,11 +703,13 @@ async function main() {
     console.log('  node etherpad-processor.js --process-etherpad_author       # 全量处理 etherpad_author');
     console.log('  node etherpad-processor.js --process-etherpad_pad_info     # 全量处理 etherpad_pad_info');
     console.log('  node etherpad-processor.js --process-pad_changes           # 智能增量处理 pad_version_changes');
+    console.log('  node etherpad-processor.js --process-pad_changes-full      # 全量重跑所有 pad_version_changes');
     console.log('');
     console.log('功能说明:');
     console.log('  --process-etherpad_author: 全量处理作者数据，清空并重新同步所有作者信息');
     console.log('  --process-etherpad_pad_info: 全量处理pad基础信息，提取atext、pool等数据');
     console.log('  --process-pad_changes: 智能增量处理，检测有变更的pads并重新生成changes数据');
+    console.log('  --process-pad_changes-full: 全量重跑，处理所有pads的changes数据（手动运行）');
     console.log('');
     console.log('数据表说明:');
     console.log('  etherpad_author: 存储作者信息和颜色配置');
