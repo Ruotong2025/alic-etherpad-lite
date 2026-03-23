@@ -880,10 +880,7 @@ const handleClientReady = async (socket:any, message: ClientReadyMessage) => {
     authorName && authorManager.setAuthorName(sessionInfo.author, authorName),
     authorColorId && authorManager.setAuthorColorId(sessionInfo.author, authorColorId),
   ]);
-  const authorRow = await authorManager.getAuthor(sessionInfo.author);
-  authorName = authorRow?.name ?? authorName;
-  // getAuthor does not backfill missing colorId; getAuthorColorId persists a palette index if absent
-  authorColorId = await authorManager.getAuthorColorId(sessionInfo.author);
+  ({colorId: authorColorId, name: authorName} = await authorManager.getAuthor(sessionInfo.author));
 
   // load the pad-object from the database
   const pad = await padManager.getPad(sessionInfo.padId, null, sessionInfo.author);
@@ -913,10 +910,7 @@ const handleClientReady = async (socket:any, message: ClientReadyMessage) => {
           'This is possibly related to https://github.com/ether/etherpad-lite/issues/2802');
     } else {
       // Filter author attribs (e.g. don't send author's pads to all clients)
-      historicalAuthorData[authorId] = {
-        name: author.name,
-        colorId: await authorManager.getAuthorColorId(authorId),
-      };
+      historicalAuthorData[authorId] = {name: author.name, colorId: author.colorId};
     }
   }));
 
@@ -1162,7 +1156,7 @@ const handleClientReady = async (socket:any, message: ClientReadyMessage) => {
     // not yet sent a CLIENT_READY message.
     if (authorId == null) return;
 
-    // reuse previously created cache of author's data (name); color always resolved so DB can be repaired
+    // reuse previously created cache of author's data
     const authorInfo = historicalAuthorData[authorId] || await authorManager.getAuthor(authorId);
     if (authorInfo == null) {
       messageLogger.error(
@@ -1178,7 +1172,7 @@ const handleClientReady = async (socket:any, message: ClientReadyMessage) => {
       data: {
         type: 'USER_NEWINFO',
         userInfo: {
-          colorId: await authorManager.getAuthorColorId(authorId),
+          colorId: authorInfo.colorId,
           name: authorInfo.name,
           userId: authorId,
         },
