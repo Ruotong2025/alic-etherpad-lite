@@ -79,7 +79,13 @@
     "scrollWhenCaretIsInTheLastLineOfViewport": false,
     "percentageToScrollWhenUserPressesArrowUp": 0
   },
-  "users": {},
+  "authenticationMethod": "apikey",
+  "users": {
+    "admin": {
+      "password": "",
+      "is_admin": true
+    }
+  },
   "socketTransportProtocols": ["websocket", "polling"],
   "socketIo": {
     "maxHttpBufferSize": 10000
